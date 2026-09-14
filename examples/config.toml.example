@@ -1,0 +1,64 @@
+# ~/.ai-gateway/config.toml 示例配置
+# 复制到 ~/.ai-gateway/config.toml 后按需填写。
+# 可用 PROXY_CONFIG 环境变量覆盖配置文件路径。
+
+[proxy]
+listen_host = "127.0.0.1"               # 监听地址（勿改 0.0.0.0，代理无客户端鉴权）
+port = 8787                              # 监听端口
+upstream_base = "https://api.example.com/v1"   # 上游 OpenAI 兼容地址（必须显式配置）
+
+# --- 认证 ---
+auth_mode = "none"   # none（默认，不注入认证头）| bearer（注入 api_key）
+api_key = ""         # auth_mode=bearer 时注入为 Authorization: Bearer <api_key>
+
+# --- 重试与 429 冷却 ---
+# max_attempts = 5                        # 重试次数上限（≥1）
+# retry_delay_ms = 2000                   # 基础退避
+# max_retry_delay_ms = 4000               # 退避上限（≥ retry_delay_ms）
+# retry_step_delay_ms = 1000              # 退避步进 = step×attempt
+# rate_limit_cooldown_ms = 2500           # 429 后的全局冷却（0=关闭）
+# retryable_statuses = "429,500,502,503,504"  # 可重试状态码（POST /responses 的 404 视为瞬态）
+
+# --- 超时 / 日志 / 捕获 ---
+# stream_idle_timeout_ms = 600000         # 流式空闲超时（0=关闭；按空闲而非总时长计时）
+# diagnostic_logging = false              # true 打印全部日志（观察 headroom/adapter 命中时临时开启）
+# log_dir = "log"                         # 日志目录（相对当前目录）
+# capture_error_bodies = false            # true 上游错误响应落盘（脱敏）
+# artifact_retention_hours = 168          # 落盘产物保留时长（0=关闭）
+# log_rotation_enabled = true             # 日志轮转（false 关闭）
+# log_rotation_max_bytes = 104857600      # 单文件上限（100MB）
+# log_rotation_keep = 5                   # 保留份数
+# log_rotation_interval_ms = 60000        # 轮转检查间隔
+
+# --- Headroom 上下文压缩 ---
+# headroom_lite_mode = "dry-run"          # off / dry-run（只统计）/ on（改写）
+# headroom_lite_min_chars = 2000          # 候选最小字符数
+# headroom_lite_min_saved_chars = 1000    # 接受的最小节省字符
+# headroom_lite_min_savings_ratio = 0.2   # 接受的最小节省比例
+# headroom_lite_min_saved_tokens = 50     # 接受的最小节省 token
+# headroom_lite_min_token_savings_ratio = 0.05
+# headroom_lite_live_zone_policy = "latest-per-type"  # all 压全部候选
+# headroom_lite_live_zone_items = 0       # >0 时只压最后 N 条候选
+# headroom_lite_store_dir = "log/headroom-lite-store"  # 原文存储（/headroom-lite/<sha> 取回）
+
+# --- reasoning-only 空转重试 ---
+# reasoning_only_retry_enabled = true     # 只吐 reasoning 不吐输出的空转轮次重打一次
+# reasoning_only_retry_models = "gpt-5.6" # 逗号分隔；前缀匹配（命中 gpt-5.6-terra）
+# reasoning_only_retry_max = 1            # 只能是 0 或 1
+# reasoning_only_retry_buffer_bytes = 8388608  # 判定缓冲上限（8MB）
+
+# --- 模型能力表覆盖（新模型上线不需要重新编译，改这里即可）---
+# text_only_models 和 responses_native_models 配了就整体替换内置表；model_aliases 是合并。
+# text_only_models = "GLM-5-Turbo,GLM-5.2,GLM-5.3"
+#   # 已确认只支持文本的模型，图片会替换为占位文本（整体替换内置表）
+# responses_native_models = "DeepSeek-V4-Flash"
+#   # 原生支持 /responses 直接透传的模型（整体替换内置表）
+# model_aliases = "GLM 6.0=GLM-6.0,Kimi K3=Kimi-K3"
+#   # 别名=正式名，逗号分隔，与内置别名合并（同名以此为准）
+
+# --- 上游协议能力（接中转站时配置）---
+# upstream_wire = "responses"  # 默认/空：GPT 系透传 /responses，非 GPT 按模型表路由
+# upstream_wire = "messages"   # 强制所有模型走 /messages 适配（支持 Anthropic Messages 的中转站）
+# upstream_wire = "chat"       # 强制所有模型走 /chat/completions 适配（仅支持 OpenAI Chat 格式的中转站）
+# model_wire = "gpt-5.6-sol=responses,deepseek-v4-flash=messages"
+#   # 单模型粒度覆盖，优先级高于 upstream_wire。格式：模型名=responses|messages|chat，逗号分隔
