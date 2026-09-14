@@ -407,3 +407,62 @@ func TestNewModelPolicyNilConfig(t *testing.T) {
 		t.Errorf("nil config 下别名失效: %q", p.NormalizeModelName("Sonnet 5"))
 	}
 }
+
+// TestClassifyUpstreamWireForcesAllModels 验证 upstream_wire="messages"/"chat" 会强制
+// 包括 GPT 系在内的所有模型走对应适配器（回归：之前 GPT 系永远透传 /responses，
+// 与文档"强制所有模型"矛盾，打到只支持 /messages 的中转站会 404）。
+func TestClassifyUpstreamWireForcesAllModels(t *testing.T) {
+	gpt := "gpt-5.6"
+	nonGPT := "deepseek-v4-flash"
+
+	// messages 强制
+	p := NewModelPolicy(&Config{UpstreamWire: "messages"})
+	if c := p.Classify(gpt); !c.IsMessagesAdapter() {
+		t.Errorf("upstream_wire=messages 下 GPT 系应走 Messages 适配, got %+v", c)
+	}
+	if c := p.Classify(nonGPT); !c.IsMessagesAdapter() {
+		t.Errorf("upstream_wire=messages 下非 GPT 应走 Messages 适配, got %+v", c)
+	}
+
+	// chat 强制
+	p = NewModelPolicy(&Config{UpstreamWire: "chat"})
+	if c := p.Classify(gpt); !c.IsAdapter() || c.Kind != "chat_adapter" {
+		t.Errorf("upstream_wire=chat 下 GPT 系应走 Chat 适配, got %+v", c)
+	}
+	if c := p.Classify(nonGPT); c.Kind != "chat_adapter" {
+		t.Errorf("upstream_wire=chat 下非 GPT 应走 Chat 适配, got %+v", c)
+	}
+
+	// 默认（responses）：GPT 系仍透传，非 GPT 走 Messages 适配（行为不变）
+	p = NewModelPolicy(&Config{})
+	if c := p.Classify(gpt); c.Kind != "gpt_passthrough" {
+		t.Errorf("默认下 GPT 系应透传, got %+v", c)
+	}
+	if c := p.Classify(nonGPT); !c.IsMessagesAdapter() {
+		t.Errorf("默认下 DeepSeek-V4-Flash 应走 Messages 适配, got %+v", c)
+	}
+
+	// model_wire 单模型覆盖仍最高优先（upstream_wire=messages 时显式指定 gpt 走 responses）
+	p = NewModelPolicy(&Config{UpstreamWire: "messages", ModelWire: map[string]string{"gpt-5.6": "responses"}})
+	if c := p.Classify(gpt); c.Kind != "responses_passthrough" {
+		t.Errorf("model_wire 覆盖应优先于 upstream_wire, got %+v", c)
+	}
+}
+
+// TestParseWireListFoldsWhitespace 验证 parseWireList 的模型名做空白折叠（与 Classify 键一致），
+// 多空格拼法也能命中 model_wire 覆盖。
+func TestParseWireListFoldsWhitespace(t *testing.T) {
+	wire := parseWireList("gpt-5.6-sol=responses, DeepSeek  V4  Flash =chat")
+	if wire["gpt-5.6-sol"] != "responses" {
+		t.Errorf("responses entry missing: %v", wire)
+	}
+	// 双空格被折叠成单空格（与 foldModelName 一致）
+	if wire["deepseek v4 flash"] != "chat" {
+		t.Errorf("folded key mismatch: %v", wire)
+	}
+	// 非法协议值丢弃
+	wire = parseWireList("m=invalid")
+	if len(wire) != 0 {
+		t.Errorf("invalid protocol should be dropped: %v", wire)
+	}
+}

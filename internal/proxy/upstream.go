@@ -424,6 +424,25 @@ func (u *Upstream) doAttempt(ctx context.Context, r *http.Request, path string, 
 	return u.client.Do(req)
 }
 
+// adaptErrorBody 把适配路径的上游错误体转成 Responses 协议的错误形态。
+// Anthropic Messages 错误是 {"type":"error","error":{...}}，Chat/Responses 是 {"error":{...}}；
+// 适配路径的客户端按 Responses 解析错误，需要顶层 error 对象。取 error 对象重包：
+// 对已是 {"error":{...}} 的响应是幂等的（不丢信息）。无法解析时原样透传。
+func adaptErrorBody(body []byte) []byte {
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return body
+	}
+	errObj, ok := doc["error"].(map[string]any)
+	if !ok {
+		return body
+	}
+	if b, err := json.Marshal(map[string]any{"error": errObj}); err == nil {
+		return b
+	}
+	return body
+}
+
 // writeResponse 把上游响应写回客户端：过滤逐跳头，SSE 流式转发，其余解压后复制。
 // adapt 非 nil 时把 Messages 响应转回 Responses 格式；doneNet 控制是否给流补 [DONE] 兜底。
 // 返回 (软错误类型, 流是否截断)：调用方据此记日志/监控事件，并设置正确的终态状态码。
@@ -434,6 +453,10 @@ func (u *Upstream) writeResponse(w http.ResponseWriter, resp *http.Response, cap
 	if resp.StatusCode >= http.StatusBadRequest {
 		body, _ := io.ReadAll(io.LimitReader(decompressBody(resp), 4<<20))
 		capture.write(resp.StatusCode, body)
+		if adapt != nil {
+			// 适配路径：把 Messages/Chat 错误体转成 Responses 协议形态再给客户端
+			body = adaptErrorBody(body)
+		}
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(body)
 		return "", false

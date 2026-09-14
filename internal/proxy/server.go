@@ -20,7 +20,7 @@ import (
 	"time"
 )
 
-// BinaryName 是代理模式的可执行文件名（argv[0] 匹配即进入代理模式）。
+// BinaryName 是代理的可执行文件名（版本/用法输出展示用）。
 const BinaryName = "proxy"
 
 // Version 是版本号；发布时可用 ldflags 覆盖：

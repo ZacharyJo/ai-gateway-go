@@ -95,13 +95,13 @@ func (c *Cooldown) Wait(ctx context.Context) {
 	}
 }
 
-// Extend 在 429 重试时延长冷却：until = max(until, now + max(cooldownMs, retryDelayMs))。
+// Extend 在 429 重试时延长冷却：until = max(until, now + max(cooldownMs, retryDelay))。
 // cooldownMs 为 0 时不做事（机制关闭）。
-func (c *Cooldown) Extend(retryDelayMs time.Duration) {
+func (c *Cooldown) Extend(retryDelay time.Duration) {
 	if !c.Enabled() {
 		return
 	}
-	delay := max(c.cooldownMs, int64(retryDelayMs/time.Millisecond))
+	delay := max(c.cooldownMs, int64(retryDelay/time.Millisecond))
 	until := time.Now().UnixMilli() + delay
 	// CAS 循环：避免 load-then-store 的竞态（两个 goroutine 都读到旧值，
 	// 后写的那个可能覆盖掉更大的截止时间，导致冷却提前结束）。

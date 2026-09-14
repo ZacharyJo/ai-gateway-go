@@ -564,24 +564,30 @@ type ChatSSETransformer struct {
 	customTools map[string]bool
 
 	// 每个 tool call index → 累积状态
-	toolCalls    map[int]*chatToolCallState
-	textStarted  bool
-	createdSent  bool   // response.created 帧只发一次
-	msgID        string // 文本 message item 的稳定 ID，在 .added 和 .done 两处复用
-	textBuf      string // 累积文本，收尾时写入 .done 事件
-	outputIndex  int    // 当前文本 output item 的下标
-	nextIdx      int    // 全局 output_index 计数器（顺序分配，保证连续不跳号）
-	usageTokens  map[string]int64 // 累积 usage（input/output tokens）
-	done         bool
+	toolCalls   map[int]*chatToolCallState
+	textStarted bool
+	createdSent bool             // response.created 帧只发一次
+	msgID       string           // 文本 message item 的稳定 ID，在 .added 和 .done 两处复用
+	textBuf     string           // 累积文本，收尾时写入 .done 事件
+	outputIndex int              // 当前文本 output item 的下标
+	nextIdx     int              // 全局 output_index 计数器（顺序分配，保证连续不跳号）
+	usageTokens map[string]int64 // 累积 usage（input/output tokens）
+	done        bool
+	// finishPending：finish_reason 已到但 response.completed 还没发。
+	// include_usage 时 usage chunk 排在 finish chunk 之后，等它到了再补发 completed，
+	// 否则 response.completed 永远缺 usage。
+	finishPending bool
+	finishStatus  string // 挂起中的终态（completed / incomplete）
+	finishModel   string // 挂起中的 model
 }
 
 type chatToolCallState struct {
-	id       string
-	name     string
-	args     string
-	index    int // Responses output_index
-	custom   bool
-	started  bool
+	id      string
+	name    string
+	args    string
+	index   int // Responses output_index
+	custom  bool
+	started bool
 }
 
 // newChatSSETransformer 构造转换器。
@@ -606,14 +612,19 @@ func (t *ChatSSETransformer) Push(data string) string {
 	if err := json.Unmarshal([]byte(data), &parsed); err != nil {
 		return ""
 	}
+	// usage 可能单独成帧（include_usage 的最后一个 chunk），也可能与 finish_reason 同帧，
+	// 统一先累计，finish 时才能带上。
+	t.flushUsage(parsed)
 	choices, _ := parsed["choices"].([]any)
 	if len(choices) == 0 {
-		// usage-only chunk（stream_options.include_usage）
-		// 注意：不能在 done=true 之后 return，usage chunk 在 finish chunk 之后到达，
-		// 必须先处理 usage 再检查 done。
-		return t.flushUsage(parsed)
+		// usage-only chunk：OpenAI 把它排在 finish chunk 之后到达，
+		// 此时 response.completed 已被挂起，补发之（含刚累计的 usage）。
+		if t.finishPending {
+			return t.emitCompleted()
+		}
+		return ""
 	}
-	if t.done {
+	if t.done || t.finishPending {
 		return ""
 	}
 	choice, _ := choices[0].(map[string]any)
@@ -697,7 +708,7 @@ func (t *ChatSSETransformer) processDelta(delta map[string]any, model string) st
 			}
 			if fn != nil && stringifyAny(fn["arguments"]) != "" && !st.custom {
 				out += sseFrame("response.function_call_arguments.delta", map[string]any{
-					"type": "response.function_call_arguments.delta",
+					"type":    "response.function_call_arguments.delta",
 					"item_id": st.id, "output_index": st.index,
 					"delta": stringifyAny(fn["arguments"]),
 				})
@@ -723,14 +734,14 @@ func (t *ChatSSETransformer) processDelta(delta map[string]any, model string) st
 				},
 			})
 			out += sseFrame("response.content_part.added", map[string]any{
-				"type": "response.content_part.added",
+				"type":    "response.content_part.added",
 				"item_id": t.msgID, "output_index": t.outputIndex, "content_index": 0,
 				"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
 			})
 		}
 		t.textBuf += content
 		out += sseFrame("response.output_text.delta", map[string]any{
-			"type": "response.output_text.delta",
+			"type":         "response.output_text.delta",
 			"output_index": t.outputIndex, "content_index": 0, "delta": content,
 		})
 	}
@@ -746,7 +757,7 @@ func (t *ChatSSETransformer) flushFinish(finishReason, model string) string {
 		if st.custom {
 			inputText := customToolInputText(parseToolInput(argsNorm))
 			out += sseFrame("response.custom_tool_call_input.done", map[string]any{
-				"type": "response.custom_tool_call_input.done",
+				"type":    "response.custom_tool_call_input.done",
 				"item_id": "ctc_" + st.id, "output_index": st.index, "input": inputText,
 			})
 			out += sseFrame("response.output_item.done", map[string]any{
@@ -758,7 +769,7 @@ func (t *ChatSSETransformer) flushFinish(finishReason, model string) string {
 			})
 		} else {
 			out += sseFrame("response.function_call_arguments.done", map[string]any{
-				"type": "response.function_call_arguments.done",
+				"type":    "response.function_call_arguments.done",
 				"item_id": st.id, "output_index": st.index, "arguments": argsNorm,
 			})
 			out += sseFrame("response.output_item.done", map[string]any{
@@ -773,7 +784,7 @@ func (t *ChatSSETransformer) flushFinish(finishReason, model string) string {
 	// 收尾文本：用累积的 textBuf 写入 .done 事件，保证 Codex 能看到完整内容
 	if t.textStarted {
 		out += sseFrame("response.content_part.done", map[string]any{
-			"type": "response.content_part.done",
+			"type":    "response.content_part.done",
 			"item_id": t.msgID, "output_index": t.outputIndex, "content_index": 0,
 			"part": map[string]any{"type": "output_text", "text": t.textBuf, "annotations": []any{}},
 		})
@@ -789,10 +800,21 @@ func (t *ChatSSETransformer) flushFinish(finishReason, model string) string {
 	if finishReason == "length" {
 		status = "incomplete"
 	}
+	// response.completed/[DONE] 先不发：include_usage 时 usage chunk 在 finish 之后才到，
+	// 等它（或 Flush 收尾）再补发，否则流式响应的 usage 永远到不了客户端。
+	t.finishPending = true
+	t.finishStatus = status
+	t.finishModel = model
+	return out
+}
+
+// emitCompleted 补发被挂起的 response.completed + [DONE]（finish 之后等 usage chunk 或 Flush）。
+func (t *ChatSSETransformer) emitCompleted() string {
 	t.done = true
+	t.finishPending = false
 	resp := map[string]any{
 		"id": t.responseID, "object": "response",
-		"created_at": t.createdAt, "model": model, "status": status,
+		"created_at": t.createdAt, "model": t.finishModel, "status": t.finishStatus,
 	}
 	if len(t.usageTokens) > 0 {
 		in := t.usageTokens["input_tokens"]
@@ -801,14 +823,12 @@ func (t *ChatSSETransformer) flushFinish(finishReason, model string) string {
 			"input_tokens": in, "output_tokens": out2, "total_tokens": in + out2,
 		}
 	}
-	out += sseFrame("response.completed", map[string]any{
+	return sseFrame("response.completed", map[string]any{
 		"type": "response.completed", "response": resp,
-	})
-	out += "data: [DONE]\n\n"
-	return out
+	}) + "data: [DONE]\n\n"
 }
 
-func (t *ChatSSETransformer) flushUsage(parsed map[string]any) string {
+func (t *ChatSSETransformer) flushUsage(parsed map[string]any) {
 	if usage, ok := parsed["usage"].(map[string]any); ok {
 		if t.usageTokens == nil {
 			t.usageTokens = map[string]int64{}
@@ -816,12 +836,15 @@ func (t *ChatSSETransformer) flushUsage(parsed map[string]any) string {
 		t.usageTokens["input_tokens"] = int64val(usage["prompt_tokens"])
 		t.usageTokens["output_tokens"] = int64val(usage["completion_tokens"])
 	}
-	return ""
 }
 
 func (t *ChatSSETransformer) Flush() string {
 	if t.done {
 		return ""
+	}
+	if t.finishPending {
+		// 流已干净结束但没等到 usage chunk（上游未开 include_usage）：补发挂起的 completed
+		return t.emitCompleted()
 	}
 	t.done = true
 	return sseFrame("response.completed", map[string]any{
@@ -831,14 +854,6 @@ func (t *ChatSSETransformer) Flush() string {
 			"created_at": t.createdAt, "model": t.model, "status": "completed",
 		},
 	}) + "data: [DONE]\n\n"
-}
-
-func (t *ChatSSETransformer) nextOutputIndex() int {
-	idx := len(t.toolCalls)
-	if t.textStarted {
-		idx++
-	}
-	return idx
 }
 
 // allocOutputIndex 分配下一个 output_index（全局递增，保证连续不跳号）。

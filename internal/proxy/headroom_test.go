@@ -420,3 +420,56 @@ func TestRewriteAcceptedOutputsOverlap(t *testing.T) {
 		t.Errorf("second replacement missing: %s", out)
 	}
 }
+
+// TestSliceTailCharsUTF16 验证 sliceChars/tailChars 按 UTF-16 码元计数（与 JS slice 对齐），
+// 且不会切出悬空代理（输出恒为有效 UTF-8，charLen(结果) ≤ n）。
+func TestSliceTailCharsUTF16(t *testing.T) {
+	// 增补字符 😀 占 2 个 UTF-16 码元；a/b 各占 1。
+	s := "a😀b"
+
+	// sliceChars
+	if got := sliceChars(s, 1); got != "a" {
+		t.Errorf(`sliceChars(s,1) = %q, want "a"`, got)
+	}
+	if got := sliceChars(s, 2); got != "a" {
+		t.Errorf(`sliceChars(s,2) = %q, want "a"（😀 为 2 码元，越界整字符跳过）`, got)
+	}
+	if got := sliceChars(s, 3); got != "a😀" {
+		t.Errorf(`sliceChars(s,3) = %q, want "a😀"`, got)
+	}
+	if got := sliceChars(s, 10); got != s {
+		t.Errorf(`sliceChars(s,10) = %q, want %q`, got, s)
+	}
+	if charLen(sliceChars(s, 2)) > 2 {
+		t.Error("sliceChars 结果 charLen 不应超过 n")
+	}
+
+	// tailChars
+	if got := tailChars(s, 1); got != "b" {
+		t.Errorf(`tailChars(s,1) = %q, want "b"`, got)
+	}
+	if got := tailChars(s, 2); got != "b" {
+		t.Errorf(`tailChars(s,2) = %q, want "b"`, got)
+	}
+	if got := tailChars(s, 3); got != "😀b" {
+		t.Errorf(`tailChars(s,3) = %q, want "😀b"`, got)
+	}
+	if got := tailChars(s, 10); got != s {
+		t.Errorf(`tailChars(s,10) = %q, want %q`, got, s)
+	}
+	if charLen(tailChars(s, 2)) > 2 {
+		t.Error("tailChars 结果 charLen 不应超过 n")
+	}
+
+	// 纯 ASCII 行为与旧实现一致
+	ascii := "abcdef"
+	if got := sliceChars(ascii, 3); got != "abc" {
+		t.Errorf(`sliceChars(ascii,3) = %q`, got)
+	}
+	if got := tailChars(ascii, 3); got != "def" {
+		t.Errorf(`tailChars(ascii,3) = %q`, got)
+	}
+	if got := sliceChars(ascii, 0); got != "" {
+		t.Errorf(`sliceChars(ascii,0) = %q, want ""`, got)
+	}
+}

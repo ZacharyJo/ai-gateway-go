@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -11,7 +12,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-
 )
 
 // testConfig 构造一个用于测试的配置：小延迟重试参数，冷却关闭。
@@ -700,5 +700,30 @@ func TestForwardImageFallbackNotRetriggered(t *testing.T) {
 	}
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("rr.Code = %d, want 400（最终交付上游错误）", rr.Code)
+	}
+}
+
+// TestAdaptErrorBody 验证适配路径的错误体逆转换：
+// Anthropic Messages 错误包成 Responses 顶层 error 形态，Chat（已是 {"error":{...}}）幂等。
+func TestAdaptErrorBody(t *testing.T) {
+	// Anthropic Messages 错误形态
+	anthropic := `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`
+	got := adaptErrorBody([]byte(anthropic))
+	if string(got) != `{"error":{"message":"Overloaded","type":"overloaded_error"}}` {
+		t.Errorf("anthropic error not reshaped: %s", got)
+	}
+	// 已是 Responses/Chat 形态：幂等（键顺序可能变，但内容等价）
+	chat := `{"error":{"message":"bad","type":"invalid_request_error","param":null,"code":"bad"}}`
+	var a, b map[string]any
+	_ = json.Unmarshal(adaptErrorBody([]byte(chat)), &a)
+	_ = json.Unmarshal([]byte(chat), &b)
+	if fmt.Sprint(a) != fmt.Sprint(b) {
+		t.Errorf("chat error not idempotent: %v vs %v", a, b)
+	}
+	// 非 JSON / 无 error 对象：原样透传
+	for _, in := range []string{"not json", `{"foo":"bar"}`} {
+		if out := adaptErrorBody([]byte(in)); string(out) != in {
+			t.Errorf("passthrough expected for %q, got %q", in, out)
+		}
 	}
 }

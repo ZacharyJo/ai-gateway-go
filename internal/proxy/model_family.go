@@ -176,11 +176,8 @@ func (p *ModelPolicy) SupportsImageInput(model string) bool {
 	return !known || supported
 }
 
-// normalizeModelName 用内置表归一（薄封装，供包内非请求路径使用）。
-func normalizeModelName(model string) string { return defaultModelPolicy.NormalizeModelName(model) }
-
-// supportsImageInput 用内置表判定图片能力（薄封装）。
-func supportsImageInput(model string) bool { return defaultModelPolicy.SupportsImageInput(model) }
+// supportsImageInput 与 classifyModelForResponses 两个内置表薄封装已移入
+// model_family_test.go（生产路径不再使用，避免无引用死代码）。
 
 // ModelClass 是 /v1/responses 的模型分类结果（对应 Classify）。
 type ModelClass struct {
@@ -220,27 +217,32 @@ func (p *ModelPolicy) Classify(model string) *ModelClass {
 			Reason:         "model_wire_override",
 		}
 	}
-	// GPT 系默认透传
+	// upstream_wire 全局覆盖：强制所有模型（含 GPT 系）走指定适配。
+	// 用于只支持 /messages 或 /chat/completions 的中转站——GPT 系模型同样要进适配器，
+	// 否则仍透传 /responses 打到不支持的端点。
+	switch p.upstreamWire {
+	case "messages":
+		return &ModelClass{
+			Kind: "messages_adapter", UpstreamPath: "/messages",
+			SupportsImages: p.SupportsImageInput(model), Reason: "upstream_wire",
+		}
+	case "chat":
+		return &ModelClass{
+			Kind: "chat_adapter", UpstreamPath: "/chat/completions",
+			SupportsImages: p.SupportsImageInput(model), Reason: "upstream_wire",
+		}
+	}
+	// 默认 "responses"：GPT 系透传
 	if isGptModel(model) {
 		return &ModelClass{Kind: "gpt_passthrough", Reason: "gpt_model"}
 	}
-	// 非 GPT：upstream_wire 全局覆盖
-	if p.upstreamWire != "messages" && p.responsesNative[p.NormalizeModelName(model)] {
+	// 非 GPT：responsesNative 表路由
+	if p.responsesNative[p.NormalizeModelName(model)] {
 		return &ModelClass{Kind: "responses_passthrough", Reason: "responses_native_model"}
 	}
-	upstreamPath := "/messages"
-	kind := "messages_adapter"
-	// upstream_wire="chat" 时走 Chat Completions 适配
-	if p.upstreamWire == "chat" {
-		upstreamPath = "/chat/completions"
-		kind = "chat_adapter"
-	}
 	return &ModelClass{
-		Kind: kind, UpstreamPath: upstreamPath,
+		Kind: "messages_adapter", UpstreamPath: "/messages",
 		SupportsImages: p.SupportsImageInput(model),
 		Reason:         "non_gpt_model",
 	}
 }
-
-// classifyModelForResponses 用内置表分类（薄封装）。
-func classifyModelForResponses(model string) *ModelClass { return defaultModelPolicy.Classify(model) }

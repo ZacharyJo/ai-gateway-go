@@ -1,9 +1,7 @@
-// Package proxy 实现本地 OpenAI 兼容代理服务。
-// 与 wrapper（claude/codex）同仓库同源码，二进制名为 proxy 时进入本模式：
+// Package proxy 实现本地 OpenAI 兼容代理服务（独立部署，不依赖任何 wrapper/内部服务）：
 // 监听本地端口，把 /v1/* 请求转发到上游 OpenAI 兼容网关，
-// 429/5xx 重试与进程级 429 冷却。
-//
-// 核心先行：Headroom 压缩、监控面板、协议适配器（Responses↔Messages/Images）、配额等后续再加。
+// 429/5xx 重试与进程级 429 冷却；另含 Headroom 上下文压缩、监控面板、
+// 协议适配器（Responses↔Messages/Chat）等能力。
 package proxy
 
 import (
@@ -372,12 +370,12 @@ func parseKVList(s string) map[string]string {
 }
 
 // parseWireList 解析逗号分隔的 `模型名=协议` 列表，只接受 responses / messages 协议值。
-// 模型名做 foldModelName 归一（trim + 小写），与 ModelPolicy 一致。
+// 模型名做 foldModelName 归一（trim + 空白折叠 + 小写），与 ModelPolicy.Classify 的键一致。
 func parseWireList(s string) map[string]string {
 	var out map[string]string
 	for _, p := range strings.Split(s, ",") {
 		k, v, ok := strings.Cut(p, "=")
-		k = strings.ToLower(strings.TrimSpace(k))
+		k = foldModelName(k)
 		v = strings.ToLower(strings.TrimSpace(v))
 		if !ok || k == "" {
 			continue

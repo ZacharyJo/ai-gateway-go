@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
 )
 
 // newTestServer 构造不依赖宿主环境的代理服务。

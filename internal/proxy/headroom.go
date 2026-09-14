@@ -88,9 +88,6 @@ func (h *Headroom) Enabled() bool {
 	return h.cfg.Mode != "off"
 }
 
-// Mode 返回三态模式。
-func (h *Headroom) Mode() string { return h.cfg.Mode }
-
 // compressLargeText 压缩大文本（对应 compressLargeText）：JSON → diff → 搜索 → 日志 → 兜底文本。
 func (h *Headroom) compressLargeText(text string) *Compression {
 	hash := hashText(text)
@@ -416,28 +413,47 @@ func charLen(s string) int {
 	return n
 }
 
-// sliceChars 取前 n 个字符（对应 JS slice(0, n)）。
+// sliceChars 取前 n 个 UTF-16 码元（对应 JS slice(0, n)；BMP 字符计 1、增补字符计 2）。
+// 若切点落在代理对中间则整字符跳过，保证 charLen(结果) ≤ n 且输出是有效 UTF-8。
 func sliceChars(s string, n int) string {
 	if n <= 0 {
 		return ""
 	}
 	runes := []rune(s)
-	if len(runes) <= n {
-		return s
+	units := 0
+	for i, r := range runes {
+		u := 1
+		if r > 0xFFFF {
+			u = 2
+		}
+		if units+u > n {
+			return string(runes[:i])
+		}
+		units += u
 	}
-	return string(runes[:n])
+	return s
 }
 
-// tailChars 取最后 n 个字符（对应 JS slice(-n)）。
+// tailChars 取最后 n 个 UTF-16 码元（对应 JS slice(-n)）。语义同 sliceChars。
 func tailChars(s string, n int) string {
 	if n <= 0 {
 		return ""
 	}
 	runes := []rune(s)
-	if len(runes) <= n {
-		return s
+	units := 0
+	start := len(runes)
+	for i := len(runes) - 1; i >= 0; i-- {
+		u := 1
+		if runes[i] > 0xFFFF {
+			u = 2
+		}
+		if units+u > n {
+			break
+		}
+		units += u
+		start = i
 	}
-	return string(runes[len(runes)-n:])
+	return string(runes[start:])
 }
 
 // indentJSON 2 空格缩进序列化（对应 JSON.stringify(v, null, 2)）。
