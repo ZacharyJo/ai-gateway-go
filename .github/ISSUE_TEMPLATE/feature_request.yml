@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest a feature or improvement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting! A clear motivation and proposed behavior help us scope it.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What you're trying to do that the proxy can't do today
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How you'd like it to work
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Workarounds or other approaches you've considered
+    validations:
+      required: false

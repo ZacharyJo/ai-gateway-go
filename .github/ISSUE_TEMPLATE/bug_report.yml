@@ -1,0 +1,55 @@
+name: Bug report
+description: Report a problem with the proxy
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please fill in as much as you can so we can reproduce the issue.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Commit or release you're running (`proxy --version`, or `git log -1 --oneline`)
+      placeholder: "v0.1.0 / 90cfd52"
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: Relevant `~/.ai-gateway/config.toml` or env vars (redact any API keys / secrets)
+      render: toml
+      placeholder: |
+        upstream_base = "https://..."
+        auth_mode = "bearer"
+    validations:
+      required: false
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: The request that triggered the bug (or steps to reproduce), plus expected vs actual behavior
+      placeholder: |
+        POST /v1/responses with model=..., stream=true ...
+
+        Expected: ...
+        Actual: ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant lines from `~/.ai-gateway/ai-gateway.log` (redact credentials)
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Go version, and (if relevant) the client used (e.g. codex version)
+      placeholder: "macOS 14 / Linux, codex vX.Y.Z"
+    validations:
+      required: false
