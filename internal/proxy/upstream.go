@@ -102,10 +102,16 @@ func (u *usageCapture) set(in, out int64) {
 func (u *Upstream) Forward(ctx context.Context, w http.ResponseWriter, r *http.Request, reqID int64) (*ForwardResult, error) {
 	// 请求体先整体读入内存，重试时才能重新发送。
 	// 加 64MB 上限防止异常大 body 撑爆内存：正常 API 请求远低于此，超出说明客户端或中间件异常。
-	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+	// 多读 1 字节检测截断——LimitReader 到上限后直接 EOF，不检测会把截断 body 当完整请求重试。
+	const maxRequestBody = 64 << 20
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBody+1))
 	if err != nil {
 		writeProxyError(w, http.StatusBadRequest, "bad_request", "failed to read request body")
 		return &ForwardResult{Status: http.StatusBadRequest, Attempts: 1}, nil
+	}
+	if len(body) > maxRequestBody {
+		writeProxyError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "request body exceeds 64MB limit")
+		return &ForwardResult{Status: http.StatusRequestEntityTooLarge, Attempts: 1}, nil
 	}
 	// Headroom 压缩（dry-run 只统计，on 改写 body；off 时 process 原样返回）
 	if u.hr != nil && u.hr.Enabled() && r.Method == http.MethodPost {
