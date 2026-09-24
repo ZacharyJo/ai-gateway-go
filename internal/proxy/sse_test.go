@@ -5,10 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+// streamSSE 是测试专用的无 usage 嗅探包装（生产路径走 streamSSEUsage）。
+func streamSSE(w http.ResponseWriter, body io.Reader, doneNet bool) (kind string, truncated bool) {
+	k, t, _, _ := streamSSEUsage(w, body, doneNet, nil)
+	return k, t
+}
 
 func TestSSEDoneTracker(t *testing.T) {
 	feedFinish := func(chunks ...string) string {
@@ -107,6 +114,34 @@ func (r *truncatedReader) Read(p []byte) (int, error) {
 	r.done = true
 	n := copy(p, r.data)
 	return n, nil
+}
+
+// zeroNilReader 第一次返回 (0,nil)（合法空读），第二次干净 EOF。
+type zeroNilReader struct {
+	reads int
+}
+
+func (r *zeroNilReader) Read(p []byte) (int, error) {
+	r.reads++
+	if r.reads == 1 {
+		return 0, nil
+	}
+	return 0, io.EOF
+}
+
+func TestStreamSSEZeroNilReadDoesNotSpin(t *testing.T) {
+	// (0,nil) 是合法但异常的空读：实现必须继续读取而不是忙旋返回。
+	// 空流（干净 EOF 但一个字节都没收到）现在按截断/失败终态上报（review 采纳：
+	// 空 200 SSE 让客户端挂死且监控按成功记，属异常）。
+	rr := httptest.NewRecorder()
+	reader := &zeroNilReader{}
+	kind, truncated := streamSSE(rr, reader, false)
+	if kind != "" {
+		t.Errorf("streamSSE = %q,%v, want no soft error", kind, truncated)
+	}
+	if !truncated {
+		t.Errorf("streamSSE = %q,%v, want truncated (empty clean stream 是异常)", kind, truncated)
+	}
 }
 
 func TestStreamSSETruncatedStreamGetsNoDone(t *testing.T) {

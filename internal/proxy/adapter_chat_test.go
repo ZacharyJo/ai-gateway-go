@@ -93,3 +93,55 @@ func TestChatSSETransformerFlushEmptyStream(t *testing.T) {
 		t.Fatalf("completed missing on empty stream:\n%s", out)
 	}
 }
+
+func TestChatSSETransformerNoOrphanDoneForIncompleteTool(t *testing.T) {
+	// 只有 index/id、name 从未到达的 tool call：Push 只发 created，不产生孤儿 .done。
+	tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+	out := tr.Push(`{"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1"}]},"finish_reason":"stop"}]}`) + tr.Flush()
+	if strings.Contains(out, "function_call_arguments.done") ||
+		strings.Contains(out, "custom_tool_call_input.done") ||
+		strings.Contains(out, "output_item.done") {
+		t.Errorf("orphan .done emitted for tool call that never started:\n%s", out)
+	}
+	// 对照：name 到达的 tool call 在 Push 返回值里正常收尾（.done 帧）。
+	tr2 := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+	out2 := tr2.Push(`{"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_2","function":{"name":"bash","arguments":"{}"}}]},"finish_reason":"stop"}]}`) + tr2.Flush()
+	if !strings.Contains(out2, "function_call_arguments.done") {
+		t.Errorf("normal tool call should get .done:\n%s", out2)
+	}
+}
+
+// TestApplyChatToolChoiceEnums 验证 Chat 适配的 tool_choice 与 Messages 版对齐：
+// map 形式的 none/auto/required 枚举都被处理（此前只认命名工具）。
+func TestApplyChatToolChoiceEnums(t *testing.T) {
+	tools := []any{map[string]any{"name": "read_file"}}
+	newOut := func() map[string]any { return map[string]any{"tools": tools} }
+
+	// auto → Chat 的 "auto"
+	out := newOut()
+	applyChatToolChoice(out, map[string]any{"type": "auto"})
+	if out["tool_choice"] != "auto" {
+		t.Errorf(`{"type":"auto"} = %v, want "auto"`, out["tool_choice"])
+	}
+	// required / any → Chat 的 "required"
+	for _, v := range []string{"required", "any"} {
+		out = newOut()
+		applyChatToolChoice(out, map[string]any{"type": v})
+		if out["tool_choice"] != "required" {
+			t.Errorf(`{"type":%q} = %v, want "required"`, v, out["tool_choice"])
+		}
+	}
+	// none → 去掉 tools（等价禁止调用）
+	out = newOut()
+	applyChatToolChoice(out, map[string]any{"type": "none"})
+	if _, has := out["tools"]; has {
+		t.Errorf(`{"type":"none"} left tools in place: %v`, out)
+	}
+	// 命名工具 → Chat 的 function 对象
+	out = newOut()
+	applyChatToolChoice(out, map[string]any{"type": "function", "name": "read_file"})
+	tc, _ := out["tool_choice"].(map[string]any)
+	if tc == nil || tc["type"] != "function" {
+		t.Errorf("named tool = %v, want Chat function object", out["tool_choice"])
+	}
+}

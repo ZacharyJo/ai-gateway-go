@@ -70,6 +70,14 @@ const (
 	EnvUpstreamWire = "UPSTREAM_WIRE"
 	// model_wire：按模型粒度覆盖协议，格式 `模型名=协议` 逗号分隔。
 	EnvModelWire = "MODEL_WIRE"
+
+	// 图片桥接（BRIDGE_IMAGEGEN_ENABLED=1 时生效）：向请求注入 bridge_imagegen 工具，
+	// 模型调用时代理转调上游 /images/* API 并把图片落盘写回响应。
+	EnvBridgeImagegenEnabled = "BRIDGE_IMAGEGEN_ENABLED"
+	EnvBridgeImagegenModel   = "IMAGE_MODEL"
+	EnvBridgeImagegenSize    = "IMAGE_SIZE"
+	EnvBridgeImagegenQuality = "IMAGE_QUALITY"
+	EnvBridgeImagegenFormat  = "IMAGE_OUTPUT_FORMAT"
 )
 
 // 默认值（内置）。
@@ -95,6 +103,12 @@ const (
 	DefaultReasoningOnlyRetryModels      = "gpt-5.6"
 	DefaultReasoningOnlyRetryMax         = 1
 	DefaultReasoningOnlyRetryBufferBytes = 8 * 1024 * 1024 // 8MB
+
+	// 图片桥接默认参数（BRIDGE_IMAGEGEN_ENABLED=1 时生效）。
+	DefaultImageModel        = "gpt-image-2.5-sunburst"
+	DefaultImageSize         = "auto"
+	DefaultImageQuality      = "medium"
+	DefaultImageOutputFormat = "png"
 )
 
 // 默认可重试状态码（环境变量未配置时使用）。
@@ -150,6 +164,16 @@ type Config struct {
 	ModelWire map[string]string
 
 	Headroom HeadroomConfig
+
+	// BridgeImagegenEnabled 为 true 时向请求注入 bridge_imagegen 工具（透传、Messages 与
+	// Chat 适配路径都注入，响应侧流式/非流式均会执行），模型调用时代理转调上游图片 API
+	// 并把结果写回。默认关（行为变化大，按需打开）。
+	BridgeImagegenEnabled bool
+	// 图片桥接参数（仅 BridgeImagegenEnabled 时生效）
+	ImageModel        string
+	ImageSize         string
+	ImageQuality      string
+	ImageOutputFormat string
 }
 
 // headroomConfig 构造 headroom 配置：环境变量 > config.toml [proxy] 段 > 内置默认。
@@ -228,6 +252,12 @@ func LoadConfigWith(pc *config.ProxyConfig) *Config {
 
 		AuthMode: strings.ToLower(strings.TrimSpace(envStr(EnvAuthMode, orDefault(pc.AuthMode, "none")))),
 		APIKey:   envStr(EnvAPIKey, orDefault(pc.APIKey, "")),
+
+		BridgeImagegenEnabled: envBoolOr(EnvBridgeImagegenEnabled, orDefault(pc.BridgeImagegenEnabled, false)),
+		ImageModel:            envStr(EnvBridgeImagegenModel, orDefault(pc.ImageModel, DefaultImageModel)),
+		ImageSize:             envStr(EnvBridgeImagegenSize, orDefault(pc.ImageSize, DefaultImageSize)),
+		ImageQuality:          envStr(EnvBridgeImagegenQuality, orDefault(pc.ImageQuality, DefaultImageQuality)),
+		ImageOutputFormat:     envStr(EnvBridgeImagegenFormat, orDefault(pc.ImageOutputFormat, DefaultImageOutputFormat)),
 	}
 	wire := strings.ToLower(strings.TrimSpace(envStr(EnvUpstreamWire, orDefault(pc.UpstreamWire, ""))))
 	if wire != "messages" && wire != "chat" {

@@ -258,6 +258,7 @@ func (h *Headroom) applyToRawBody(path string, body []byte, jsonDoc any) *ApplyR
 	}
 	out := cloneJSON(jsonDoc)
 	replacementsByPath := map[string]string{}
+	originalsByPath := map[string]string{}
 	originals := []Original{}
 	outMap, _ := out.(map[string]any)
 	for _, stat := range analysis.Accepted {
@@ -285,9 +286,10 @@ func (h *Headroom) applyToRawBody(path string, body []byte, jsonDoc any) *ApplyR
 		}
 		item["output"] = comp.Compressed
 		replacementsByPath[stat.Path] = comp.Compressed
+		originalsByPath[stat.Path] = original
 		originals = append(originals, Original{Hash: comp.Hash, Path: stat.Path, Text: original})
 	}
-	rawBody := rewriteAcceptedOutputsRaw(body, analysis.Accepted, replacementsByPath)
+	rawBody := rewriteAcceptedOutputsRaw(body, analysis.Accepted, replacementsByPath, originalsByPath)
 	result := &ApplyResult{Body: body, Changed: len(originals) > 0, Analysis: analysis, Originals: originals, RawRewrite: rawBody != nil}
 	if rawBody != nil {
 		result.Body = rawBody

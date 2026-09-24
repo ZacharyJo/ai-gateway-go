@@ -62,3 +62,15 @@ api_key = ""         # auth_mode=bearer 时注入为 Authorization: Bearer <api_
 # upstream_wire = "chat"       # 强制所有模型走 /chat/completions 适配（仅支持 OpenAI Chat 格式的中转站）
 # model_wire = "gpt-5.6-sol=responses,deepseek-v4-flash=messages"
 #   # 单模型粒度覆盖，优先级高于 upstream_wire。格式：模型名=responses|messages|chat，逗号分隔
+
+# --- 图片桥接（bridge_imagegen，默认关）---
+# 开启后向请求注入 bridge_imagegen 工具：模型调用时代理转调上游 /images/* API 生成/编辑图片，
+# 图片落盘到 <log_dir>/generated-images/，结果写回响应——让不支持原生图片工具的模型也能出图。
+# 上游需支持 /v1/images/generations（编辑另需 /v1/images/edits）。客户端侧用
+# `proxy skill-imagegen <dir>` 安装配套 skill（SKILL.md + scripts/image_gen.py）。
+# bridge_imagegen_enabled = false       # =true 时启用
+# image_model = "gpt-image-2.5-sunburst"  # 上游图片模型 ID
+# image_size = "auto"                   # 尺寸（auto / 1024x1024 / 512x512 等）
+# image_quality = "medium"              # 质量（low / medium / high）
+# image_output_format = "png"           # 落盘格式（png / jpeg / webp）
+

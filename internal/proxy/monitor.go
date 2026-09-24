@@ -42,6 +42,9 @@ type Event struct {
 	MaxAttempt int       `json:"maxTry,omitempty"`
 	DurMs      int64     `json:"durMs,omitempty"`
 	Source     string    `json:"source,omitempty"`
+	// 本次请求采集到的 usage（透传路径嗅探 / 适配转换器 / 非流式 body 顶层）。
+	InputTokens  int64 `json:"inTokens,omitempty"`
+	OutputTokens int64 `json:"outTokens,omitempty"`
 }
 
 // SourceStat 是按会话聚合的统计。

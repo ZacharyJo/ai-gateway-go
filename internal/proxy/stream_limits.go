@@ -23,7 +23,18 @@ var (
 	reServerOverloaded = regexp.MustCompile(`(?i)server_is_overloaded`)
 	reServersOverload  = regexp.MustCompile(`(?i)servers?\s+.*overloaded`)
 	reTryAgainLater    = regexp.MustCompile(`(?i)please try again later`)
+	// 终态（不可重试）错误：上游按 Prompt 指纹做防重放，命中后该 prompt 进 ~25min 冷却。
+	// 对它重试是必然失败且会延长冷却，故绝不能转成 server_overloaded 诱导客户端重试。
+	reFingerprintCooldown = regexp.MustCompile(`(?i)fingerprint_replay_cooldown|重放冷却`)
 )
+
+// terminalStreamErrorKind 是命中后应当作终态透传（不发 server_overloaded、不诱导客户端重试）的错误类型。
+const kindFingerprintCooldown = "fingerprint_cooldown"
+
+// isTerminalStreamErrorKind 判断软错误检测出的 kind 是否为终态（不可重试）类型。
+func isTerminalStreamErrorKind(kind string) bool {
+	return kind == kindFingerprintCooldown
+}
 
 // errorContainerKeys 是承载错误对象的字段名；只在这些字段内部收集文本，避免正常内容误命中。
 var errorContainerKeys = map[string]bool{
@@ -82,6 +93,8 @@ func retryableKindFromSSE(text string) string {
 	}
 	joined := strings.Join(texts, "\n")
 	switch {
+	case reFingerprintCooldown.MatchString(joined):
+		return kindFingerprintCooldown // 终态：不可重试
 	case reConcurrencyLimit.MatchString(joined) && reRetryLater.MatchString(joined):
 		return "concurrency_limit"
 	case reModelAtCapacity.MatchString(joined) && reTryDifferent.MatchString(joined),

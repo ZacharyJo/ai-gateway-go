@@ -71,6 +71,14 @@ func NewServer(cfg *Config, log *Logger) (*Server, error) {
 
 // ServeHTTP 实现 http.Handler，按路径分流。
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 路径穿越防护：upstreamPath 剥掉 /v1 后原样拼上游 base 路径，若客户端路径含 .. 段
+	// （Go 服务器会把 %2e%2e/%2f 解码进 URL.Path）会逃出 /v1 作用域，带凭据打到上游
+	// 任意端点。任何含 .. 段的路径一律 400 拒绝（合法 OpenAI 客户端不会发这种路径）。
+	if hasDotDotSegment(r.URL.Path) {
+		s.log.Infof("path_dotdot_rejected %s %s remote=%s", r.Method, r.URL.Path, r.RemoteAddr)
+		writeProxyError(w, http.StatusBadRequest, "bad_path", "request path contains '..' segment")
+		return
+	}
 	switch {
 	case r.URL.Path == "/favicon.ico" || r.URL.Path == "/.well-known/appspecific/com.chrome.devtools.json":
 		// 浏览器/DevTools 探测请求：直接 204，不转发上游
@@ -87,6 +95,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		s.handleForward(w, r)
 	}
+}
+
+// hasDotDotSegment 判断路径是否含 .. 段（路径穿越防护）。
+// Go 服务器会把 %2e%2e、%2f 等百分号编码解码进 URL.Path，故只需检查解码后的路径。
+// 逐段判断而非整串匹配：/v1/.. 与 /v1/foo/../bar 都能命中，且不受前缀干扰。
+func hasDotDotSegment(path string) bool {
+	for _, seg := range strings.Split(path, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // handleHeadroomOriginal 返回压缩前原文（/headroom-lite/<sha256>）。
@@ -123,9 +143,10 @@ func (s *Server) handleForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	durMs := time.Since(start).Milliseconds()
-	s.log.Requestf("request_finish req=%d %s %s status=%d try=%d/%d dur=%dms",
-		reqID, r.Method, r.URL.Path, res.Status, res.Attempts, s.cfg.MaxAttempts, durMs)
-	s.mon.Record(Event{Name: "request_finish", ReqID: reqID, Method: r.Method, Path: r.URL.Path, Status: res.Status, Attempts: res.Attempts, MaxAttempt: s.cfg.MaxAttempts, DurMs: durMs, Source: source})
+	s.log.Requestf("request_finish req=%d %s %s status=%d try=%d/%d dur=%dms in_tokens=%d out_tokens=%d",
+		reqID, r.Method, r.URL.Path, res.Status, res.Attempts, s.cfg.MaxAttempts, durMs,
+		res.InputTokens, res.OutputTokens)
+	s.mon.Record(Event{Name: "request_finish", ReqID: reqID, Method: r.Method, Path: r.URL.Path, Status: res.Status, Attempts: res.Attempts, MaxAttempt: s.cfg.MaxAttempts, DurMs: durMs, Source: source, InputTokens: res.InputTokens, OutputTokens: res.OutputTokens})
 }
 
 // handleStats 返回监控 JSON（/api/stats）。
@@ -200,6 +221,7 @@ func printProxyUsage(w io.Writer, cfg *Config) {
     restart   重启
     status    查看 PID + /healthz
     logs      跟踪日志
+    skill-imagegen <dir>  把内嵌 imagegen skill 安装到指定目录（不覆盖已存在的同名 skill）
     --help / -h   本帮助
     --version / -v 版本
 
@@ -296,8 +318,23 @@ func Main() int {
 			return daemonStatus(cfg)
 		case "logs":
 			return daemonLogs(cfg)
+		case "skill-imagegen":
+			// 安装内嵌的 imagegen skill 到指定目录（用户自选，不碰 ~/.codex 已存在的同名 skill）。
+			if len(os.Args) < 3 {
+				fmt.Fprintf(os.Stderr, "用法: %s skill-imagegen <目标目录>\n", BinaryName)
+				return 2
+			}
+			installed, err := installImagegenSkill(os.Args[2])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: 安装 imagegen skill 失败: %v\n", err)
+				return 1
+			}
+			for _, p := range installed {
+				fmt.Println(p)
+			}
+			return 0
 		default:
-			fmt.Fprintf(os.Stderr, "error: 未知参数 %q；支持: start / stop / restart / status / logs / --help / --version\n\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "error: 未知参数 %q；支持: start / stop / restart / status / logs / skill-imagegen / --help / --version\n\n", os.Args[1])
 			printProxyUsage(os.Stderr, cfg)
 			return 2
 		}

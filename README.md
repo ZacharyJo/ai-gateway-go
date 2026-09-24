@@ -67,6 +67,25 @@ api_key = "sk-your-key"
 | `upstream_wire = "chat"` | Force all models to `/chat/completions` (for upstreams supporting only OpenAI Chat) |
 | `model_wire = "model=protocol"` | Per-model override, highest priority |
 
+### Image bridge (`bridge_imagegen`, off by default)
+
+Lets models that lack native image generation still produce/edit images. When enabled, the proxy injects a `bridge_imagegen` tool into requests: when the model calls it, the proxy forwards to the upstream image API (`/images/generations` or `/images/edits`), persists the image under `<log_dir>/generated-images/`, and writes the result back into the response.
+
+```toml
+# ~/.ai-gateway/config.toml [proxy] section
+bridge_imagegen_enabled = true            # enable
+image_model = "gpt-image-2.5-sunburst"    # upstream image model id
+image_size = "auto"                       # size
+image_quality = "medium"                  # quality
+image_output_format = "png"               # output format (png / jpeg / webp)
+```
+
+Requirements & usage:
+
+- **The upstream must support `/v1/images/*`** (OpenAI-compatible image endpoints; most third-party relays do).
+- Install the companion client skill with `proxy skill-imagegen <target-dir>` (SKILL.md + `scripts/image_gen.py`; existing files are not overwritten).
+- Env equivalents: `BRIDGE_IMAGEGEN_ENABLED` / `IMAGE_MODEL` / `IMAGE_SIZE` / `IMAGE_QUALITY` / `IMAGE_OUTPUT_FORMAT`.
+
 ### Client setup
 
 **codex** (`~/.codex/config.toml`):

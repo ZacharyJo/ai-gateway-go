@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -46,6 +47,31 @@ func TestLastSSEBoundary(t *testing.T) {
 	}
 	if got := lastSSEBoundary("data: a"); got != -1 {
 		t.Errorf("no boundary = %d, want -1", got)
+	}
+}
+
+func TestMessagesSSEThinkMarkerSplitAcrossFramesNotLeaked(t *testing.T) {
+	// <think>…</think> 被切在多个 text_delta 帧里：任何一帧都不应把标记片段或思考正文
+	// 下发给客户端，收尾正文应为思考块被剥离后的干净文本。
+	sse := strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"m1","model":"m"}}`, ``,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`, ``,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello <thi"}}`, ``,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"nk>secret rea"}}`, ``,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"soning</thi"}}`, ``,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"nk> world"}}`, ``,
+		`data: {"type":"content_block_stop","index":0}`, ``,
+		`data: {"type":"message_stop"}`, ``,
+	}, "\n") + "\n"
+
+	out := pushAll(t, "m", sse)
+	for _, leak := range []string{"<thi", "<think", "</think", "secret", "reasoning"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("leaked internal marker/thinking %q in stream:\n%s", leak, out)
+		}
+	}
+	if !strings.Contains(out, `"text":"Hello  world"`) {
+		t.Errorf("final sanitized text missing: %s", out)
 	}
 }
 
@@ -346,5 +372,27 @@ func TestMessagesSSESanitizesMarkerSplitAcrossDeltas(t *testing.T) {
 	}
 	if !strings.Contains(out, "hello world") {
 		t.Errorf("清理后正文应拼成 hello world:\n%s", out)
+	}
+}
+
+// TestMessagesSSECreatedAtIsUnixSeconds 验证 response.created 的 created_at 是 Unix 秒
+// （而非毫秒——此前误用 UnixMilli，客户端按秒解析会得到公元 58221 年）。
+func TestMessagesSSECreatedAtIsUnixSeconds(t *testing.T) {
+	tr := newMessagesSSETransformer("m", nil)
+	out := tr.Push(`data: {"type":"message_start","message":{"id":"m1","model":"m"}}` + "\n\n")
+	frame := extractFrameData(t, out, "response.created")
+	var doc struct {
+		Response struct {
+			CreatedAt int64 `json:"created_at"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal([]byte(frame), &doc); err != nil {
+		t.Fatalf("unmarshal created: %v", err)
+	}
+	if doc.Response.CreatedAt >= 1_000_000_000_000 { // 1e12：毫秒是 ~1.79e12，秒是 ~1.79e9
+		t.Errorf("created_at = %d, want Unix 秒（<1e12，当前是毫秒）", doc.Response.CreatedAt)
+	}
+	if doc.Response.CreatedAt < 1_600_000_000 {
+		t.Errorf("created_at = %d, 太早（不在近年的 Unix 秒范围）", doc.Response.CreatedAt)
 	}
 }

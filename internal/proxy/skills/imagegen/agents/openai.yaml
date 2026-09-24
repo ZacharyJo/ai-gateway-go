@@ -1,0 +1,4 @@
+interface:
+  display_name: "Image Generation"
+  short_description: "Generate or edit images through the proxy image bridge"
+  default_prompt: "Use the image_gen.py script from this skill for image generation and editing. Do not use native image_generation tools, ad-hoc shell commands, or filesystem searches for substitute images."

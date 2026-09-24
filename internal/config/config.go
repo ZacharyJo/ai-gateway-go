@@ -73,6 +73,14 @@ type ProxyConfig struct {
 	HeadroomMinTokenSavingsRatio *float64 `toml:"headroom_lite_min_token_savings_ratio"`
 	HeadroomLiveZonePolicy       *string  `toml:"headroom_lite_live_zone_policy"`
 	HeadroomLiveZoneItems        *int     `toml:"headroom_lite_live_zone_items"`
+
+	// 图片桥接（bridge_imagegen_enabled=true 时生效）：向请求注入 bridge_imagegen 工具，
+	// 模型调用时代理转调上游 /images/* API 并把图片落盘写回响应。
+	BridgeImagegenEnabled *bool   `toml:"bridge_imagegen_enabled"`
+	ImageModel            *string `toml:"image_model"`
+	ImageSize             *string `toml:"image_size"`
+	ImageQuality          *string `toml:"image_quality"`
+	ImageOutputFormat     *string `toml:"image_output_format"`
 }
 
 // Load 读取 TOML 配置文件并返回 [proxy] 段（nil 接收者安全）。

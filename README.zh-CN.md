@@ -67,6 +67,25 @@ api_key = "sk-your-key"
 | `upstream_wire = "chat"` | 强制所有模型走 `/chat/completions`（仅支持 OpenAI Chat 的上游） |
 | `model_wire = "模型名=协议"` | 单模型粒度覆盖，优先级最高 |
 
+### 图片桥接（`bridge_imagegen`，默认关）
+
+让**不支持原生图片工具**的模型也能生成/编辑图片。开启后代理向请求注入 `bridge_imagegen` 工具：模型调用它时代理转调上游图片 API（`/images/generations` 或 `/images/edits`），图片落盘到 `<log_dir>/generated-images/`，并把结果写回响应。
+
+```toml
+# ~/.ai-gateway/config.toml [proxy] 段
+bridge_imagegen_enabled = true            # 启用
+image_model = "gpt-image-2.5-sunburst"    # 上游图片模型 ID
+image_size = "auto"                       # 尺寸
+image_quality = "medium"                  # 质量
+image_output_format = "png"               # 落盘格式（png / jpeg / webp）
+```
+
+要求与使用：
+
+- **上游需支持 `/v1/images/*`**（OpenAI 兼容图片端点，多数第三方中转支持）。
+- 客户端（如 codex）需把 `bridge_imagegen` 当作可用工具；配套的客户端 skill 用 `proxy skill-imagegen <目标目录>` 安装（SKILL.md + `scripts/image_gen.py`，不覆盖已存在的同名文件）。
+- 环境变量等价：`BRIDGE_IMAGEGEN_ENABLED` / `IMAGE_MODEL` / `IMAGE_SIZE` / `IMAGE_QUALITY` / `IMAGE_OUTPUT_FORMAT`。
+
 ### 客户端接入
 
 **codex**（`~/.codex/config.toml`）：
