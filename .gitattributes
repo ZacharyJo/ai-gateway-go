@@ -1,0 +1,20 @@
+# 文本文件统一 LF 行尾，按内容识别
+* text=auto eol=lf
+
+*.go text
+*.md text
+*.yml text
+*.yaml text
+*.toml text
+*.sh text eol=lf
+
+# 二进制保持原样
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+
+# diff 时忽略 go.sum 版本行噪声
+go.sum -merge
