@@ -83,6 +83,7 @@ image_output_format = "png"               # output format (png / jpeg / webp)
 Requirements & usage:
 
 - **The upstream must support `/v1/images/*`** (OpenAI-compatible image endpoints; most third-party relays do).
+- Both `b64_json` and `url` image responses are supported (relays commonly return `url`; the proxy downloads and persists it).
 - Install the companion client skill with `proxy skill-imagegen <target-dir>` (SKILL.md + `scripts/image_gen.py`; existing files are not overwritten).
 - Env equivalents: `BRIDGE_IMAGEGEN_ENABLED` / `IMAGE_MODEL` / `IMAGE_SIZE` / `IMAGE_QUALITY` / `IMAGE_OUTPUT_FORMAT`.
 
