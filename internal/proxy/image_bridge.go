@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -339,25 +340,72 @@ func (u *Upstream) executeImageBridge(args *imageBridgeArgs, r *http.Request, re
 	var doc struct {
 		Data []struct {
 			B64JSON       string `json:"b64_json"`
+			URL           string `json:"url"`
 			RevisedPrompt string `json:"revised_prompt"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
 		return nil, fmt.Errorf("image API returned invalid JSON: %v", err)
 	}
-	if len(doc.Data) == 0 || doc.Data[0].B64JSON == "" {
-		return nil, fmt.Errorf("image API returned HTTP %d without data[0].b64_json", resp.StatusCode)
+	if len(doc.Data) == 0 {
+		return nil, fmt.Errorf("image API returned HTTP %d without data", resp.StatusCode)
 	}
-	imagePath, err := u.persistBridgeImage(doc.Data[0].B64JSON, reqID)
+	// 部分上游（第三方中转/聚合）返回图片 URL 而非 base64：两种形态都支持。
+	item := doc.Data[0]
+	var raw []byte
+	var b64JSON string
+	if item.B64JSON != "" {
+		b64JSON = item.B64JSON
+		raw = decodeBase64(item.B64JSON)
+	} else if item.URL != "" {
+		var err error
+		raw, err = u.downloadBridgeImage(item.URL)
+		if err != nil {
+			return nil, fmt.Errorf("bridge_imagegen download %s: %v", item.URL, err)
+		}
+		// URL 形态也要把图片内嵌进 image_generation_call.result，否则 codex 拿到空图
+		//（下载/落盘成功但 result=""，客户端不显示）。
+		b64JSON = base64.StdEncoding.EncodeToString(raw)
+	} else {
+		return nil, fmt.Errorf("image API returned HTTP %d without data[0].b64_json or url", resp.StatusCode)
+	}
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("image API returned un-decodable or empty image")
+	}
+	imagePath, err := u.persistBridgeImageBytes(raw, reqID)
 	if err != nil {
 		return nil, err
 	}
 	return &imageBridgeResult{
-		b64JSON:       doc.Data[0].B64JSON,
-		revisedPrompt: doc.Data[0].RevisedPrompt,
+		b64JSON:       b64JSON,
+		revisedPrompt: item.RevisedPrompt,
 		imagePath:     imagePath,
 	}, nil
 }
+
+// downloadBridgeImage 从图片 URL 下载字节（部分上游返回 url 而非 b64_json）。
+// 用独立 client：主转发 client 禁 3xx 重定向（ErrUseLastResponse），图片 CDN 常重定向。
+// 只允许 http/https scheme：URL 来自上游响应，加白名单防御被攻陷/恶意的上游指向
+// file:// /内网地址等触发服务端 SSRF 下载。
+func (u *Upstream) downloadBridgeImage(imageURL string) ([]byte, error) {
+	parsed, err := url.Parse(imageURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return nil, fmt.Errorf("unsupported image URL scheme %q", imageURL)
+	}
+	client := &http.Client{Timeout: imageAPITimeout}
+	resp, err := client.Get(imageURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("image URL returned HTTP %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, maxBridgeImageBytes))
+}
+
+// maxBridgeImageBytes 是下载图片的字节上限（防异常 URL 撑爆内存）。
+const maxBridgeImageBytes = 20 << 20 // 20MB
 
 // doImageAPI 发送一次上游图片 API 请求。
 // 图片生成通常 10-60s：加显式超时兜底，避免上游挂起时无限阻塞 SSE 流。
@@ -413,12 +461,11 @@ func underDir(path, dir string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// persistBridgeImage 把图片 base64 落盘到 <LogDir>/generated-images/，返回绝对路径。
+// persistBridgeImageBytes 把图片字节落盘到 <LogDir>/generated-images/，返回绝对路径。
 // 扩展名按 ImageOutputFormat（png/jpeg/webp）取，与文件实际内容一致。
-func (u *Upstream) persistBridgeImage(b64 string, reqID int64) (string, error) {
-	raw := decodeBase64(b64)
+func (u *Upstream) persistBridgeImageBytes(raw []byte, reqID int64) (string, error) {
 	if len(raw) == 0 {
-		return "", fmt.Errorf("image API returned un-decodable b64_json")
+		return "", fmt.Errorf("empty image bytes")
 	}
 	dir := filepath.Join(u.cfg.LogDir, "generated-images")
 	if err := os.MkdirAll(dir, 0o755); err != nil {

@@ -286,3 +286,75 @@ func TestInterceptBridgeNonStreamingSkip(t *testing.T) {
 		t.Fatalf("skipped call hits = %d, want still 1 (double-execution bug)", hits)
 	}
 }
+
+// TestExecuteImageBridgeURLResponse 验证上游返回图片 URL（而非 b64_json）时，
+// 桥接会下载图片并落盘到 generated-images/（第三方中转普遍返回 url）。
+func TestExecuteImageBridgeURLResponse(t *testing.T) {
+	// 图片文件端点：返回一个假 JPEG 字节
+	imgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write([]byte("\xff\xd8\xff\xe0fake-jpeg-bytes"))
+	}))
+	defer imgSrv.Close()
+
+	// 图片 API：返回 url 而非 b64_json
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/images/generations" {
+			t.Errorf("path = %s, want /images/generations", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"url":"` + imgSrv.URL + `/img.jpeg","mime_type":"image/jpeg"}]}`))
+	}))
+	defer apiSrv.Close()
+
+	base, _ := url.Parse(apiSrv.URL)
+	logDir := t.TempDir()
+	u := &Upstream{
+		cfg: &Config{
+			BridgeImagegenEnabled: true,
+			ImageModel:            "grok-imagine-image-2.0",
+			ImageSize:             "1024x1024",
+			ImageQuality:          "medium",
+			ImageOutputFormat:     "jpeg",
+			LogDir:                logDir,
+			AuthMode:              "none",
+		},
+		base:   base,
+		client: &http.Client{Timeout: 5 * time.Second},
+		log:    NewLogger(io.Discard, false),
+	}
+
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://127.0.0.1/v1/responses", nil)
+	res, err := u.executeImageBridge(&imageBridgeArgs{Action: "generate", Prompt: "a cat"}, req, 1)
+	if err != nil {
+		t.Fatalf("executeImageBridge: %v", err)
+	}
+	if res.imagePath == "" {
+		t.Fatal("imagePath empty")
+	}
+	// 落盘内容应与图片端点字节一致（下载而非空）
+	raw, err := os.ReadFile(res.imagePath)
+	if err != nil {
+		t.Fatalf("read persisted image: %v", err)
+	}
+	if !strings.Contains(string(raw), "fake-jpeg-bytes") {
+		t.Errorf("persisted image bytes mismatch: %q", raw)
+	}
+	// URL 形态也必须内嵌 base64 到 result，否则 codex 拿到空图
+	if res.b64JSON == "" {
+		t.Error("b64JSON empty for URL response (client would receive a blank image)")
+	}
+	if want := base64.StdEncoding.EncodeToString(raw); res.b64JSON != want {
+		t.Errorf("b64JSON mismatch: got len=%d want len=%d", len(res.b64JSON), len(want))
+	}
+}
+
+// TestDownloadBridgeImageSchemeWhitelist 验证只允许 http/https 图片 URL（SSRF 防御）。
+func TestDownloadBridgeImageSchemeWhitelist(t *testing.T) {
+	up := &Upstream{cfg: &Config{}, log: NewLogger(io.Discard, false)}
+	for _, bad := range []string{"file:///etc/passwd", "ftp://example.com/img.png", "data:image/png;base64,AAAA"} {
+		if _, err := up.downloadBridgeImage(bad); err == nil {
+			t.Errorf("scheme should be rejected: %s", bad)
+		}
+	}
+}

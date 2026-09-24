@@ -83,6 +83,7 @@ image_output_format = "png"               # 落盘格式（png / jpeg / webp）
 要求与使用：
 
 - **上游需支持 `/v1/images/*`**（OpenAI 兼容图片端点，多数第三方中转支持）。
+- 图片响应支持 `b64_json` 与 `url` 两种形态（第三方中转普遍返回 url，代理会自动下载并落盘）。
 - 客户端（如 codex）需把 `bridge_imagegen` 当作可用工具；配套的客户端 skill 用 `proxy skill-imagegen <目标目录>` 安装（SKILL.md + `scripts/image_gen.py`，不覆盖已存在的同名文件）。
 - 环境变量等价：`BRIDGE_IMAGEGEN_ENABLED` / `IMAGE_MODEL` / `IMAGE_SIZE` / `IMAGE_QUALITY` / `IMAGE_OUTPUT_FORMAT`。
 
