@@ -66,6 +66,7 @@ type messagesSSEState struct {
 	responseID          string
 	messageID           string
 	model               any
+	createdAt           int64
 	messageItemAdded    bool
 	messageOutputIndex  int
 	nextOutputIndex     int
@@ -73,8 +74,10 @@ type messagesSSEState struct {
 	inputTokens         int
 	outputTokens        int
 	contentTextByIndex  map[int]string
-	contentIndexByBlock map[int]int
-	outputIndexByBlock  map[int]int
+	rawConsumedByIndex  map[int]int    // 已处理/下发的原文字节数（只扫未处理尾部，避免逐帧全量重扫的 O(n²)）
+	contentIndexByBlock map[int]int    // block index -> 已分配的 content_index
+	outputIndexByBlock  map[int]int    // block index -> 已分配的 output_index
+	blockTypeByIndex    map[int]string // block index -> 上游块类型（text/tool_use/thinking/...）
 	toolUseByIndex      map[int]*toolUseState
 	customTools         map[string]bool
 	done                bool // 已发出终态（failed 或 completed），后续帧全部丢弃
@@ -94,10 +97,13 @@ func newMessagesSSETransformer(model string, customTools map[string]bool) *Messa
 		responseID:          fmt.Sprintf("resp_%d", nowMs),
 		messageID:           "msg_0",
 		model:               model,
+		createdAt:           nowMs / 1000, // Responses 协议 created_at 是 Unix 秒（与 Chat SSE/非流式一致）
 		messageOutputIndex:  -1,
 		contentTextByIndex:  map[int]string{},
+		rawConsumedByIndex:  map[int]int{},
 		contentIndexByBlock: map[int]int{},
 		outputIndexByBlock:  map[int]int{},
+		blockTypeByIndex:    map[int]string{},
 		toolUseByIndex:      map[int]*toolUseState{},
 		customTools:         customTools,
 	}}
@@ -181,6 +187,11 @@ func (t *MessagesSSETransformer) Flush() string {
 	return out
 }
 
+// Usage 返回累积的 input/output token 数（计量用；Flush 后读取）。
+func (t *MessagesSSETransformer) Usage() (in, out int64) {
+	return int64(t.state.inputTokens), int64(t.state.outputTokens)
+}
+
 // intIndex 从事件的 index 字段取整数下标（缺省 0）。
 func intIndex(v any) int {
 	if f, ok := v.(float64); ok {
@@ -227,17 +238,21 @@ func convertMessagesSSE(text string, st *messagesSSEState) string {
 				"type": "response.created",
 				"response": map[string]any{
 					"id": st.responseID, "object": "response", "status": "in_progress", "model": st.model,
+					"created_at": st.createdAt,
 				},
 			}))
 
 		case eventType == "content_block_start":
 			block, _ := parsed["content_block"].(map[string]any)
 			idx := intIndex(parsed["index"])
-			switch stringifyAny(block["type"]) {
+			blockType := stringifyAny(block["type"])
+			st.blockTypeByIndex[idx] = blockType
+			switch blockType {
 			case "text":
 				outputIndex := st.ensureMessageOutputIndex()
 				contentIndex := st.contentIndexForBlock(idx)
-				st.contentTextByIndex[idx] = sanitizeAssistantText(stringifyAny(block["text"]))
+				// 存原文（不在此处清洗）：流式下发与收尾都基于累计原文统一做跨帧安全清洗。
+				st.contentTextByIndex[idx] = stringifyAny(block["text"])
 				if !st.messageItemAdded {
 					st.messageItemAdded = true
 					out.WriteString(sseFrame("response.output_item.added", map[string]any{
@@ -252,13 +267,22 @@ func convertMessagesSSE(text string, st *messagesSSEState) string {
 				}))
 			case "tool_use":
 				outputIndex := st.outputIndexForBlock(idx)
-				// 先以空 input 生成骨架，实际入参靠 input_json_delta 累积
+				// 先以空入参生成骨架，实际入参靠 input_json_delta 累积。
+				// 首帧状态用 in_progress + 空入参（与 Chat SSE 路径一致），
+				// 真实入参与 completed 状态在 content_block_stop 收尾时给出，
+				// 避免 codex 按 .added 派发到"已完成且入参为 {}"的空调用。
 				skeleton := map[string]any{}
 				for k, v := range block {
 					skeleton[k] = v
 				}
 				skeleton["input"] = map[string]any{}
 				item := toolUseToOutputItem(skeleton, time.Now().UnixMilli(), st.customTools)
+				item["status"] = "in_progress"
+				if stringifyAny(item["type"]) == "custom_tool_call" {
+					item["input"] = ""
+				} else {
+					item["arguments"] = ""
+				}
 				custom := stringifyAny(item["type"]) == "custom_tool_call"
 				st.toolUseByIndex[idx] = &toolUseState{block: block, item: item, custom: custom}
 				out.WriteString(sseFrame("response.output_item.added", map[string]any{
@@ -271,18 +295,32 @@ func convertMessagesSSE(text string, st *messagesSSEState) string {
 			idx := intIndex(parsed["index"])
 			switch stringifyAny(delta["type"]) {
 			case "text_delta":
+				// 只对 text（或未声明类型的——部分上游如 minimax 直接发 text_delta
+				// 无 content_block_start）块累积正文；明确是 thinking/image 等非 text
+				// 块即便上游（非规范地）发 text_delta 也不下发（无 content_part.added
+				// 配对，孤儿 delta）。
+				switch st.blockTypeByIndex[idx] {
+				case "text", "":
+				default:
+					continue
+				}
 				outputIndex := st.ensureMessageOutputIndex()
 				contentIndex := st.contentIndexForBlock(idx)
 				raw := stringifyAny(delta["text"])
-				// 累积存原文：两处消费方（content_block_stop / message_stop）本来就会
-				// 对整段做一次 sanitize，这里再逐帧对整段累积文本重跑正则是 O(n²)，
-				// 超长输出下白扫几十遍。跨帧被切断的标记仍由收尾那次统一清掉。
 				st.contentTextByIndex[idx] += raw
-				if text := sanitizeAssistantText(raw); text != "" {
-					out.WriteString(sseFrame("response.output_text.delta", map[string]any{
-						"type": "response.output_text.delta", "item_id": st.messageID,
-						"output_index": outputIndex, "content_index": contentIndex, "delta": text,
-					}))
+				// 只对"未处理尾部"做跨帧安全切分与清洗（已处理前缀是稳定安全的，无需重扫）：
+				// 把 <think>/minimax 标记与未闭合 think 区段留在尾部缓冲，避免原始标记泄漏；
+				// 且避免逐帧对整段累积文本重跑正则的 O(n²)。
+				consumed := st.rawConsumedByIndex[idx]
+				pending := st.contentTextByIndex[idx][consumed:]
+				if safe, _ := streamSafeSplit(pending); safe != "" {
+					st.rawConsumedByIndex[idx] = consumed + len(safe)
+					if chunk := sanitizeAssistantText(safe); chunk != "" {
+						out.WriteString(sseFrame("response.output_text.delta", map[string]any{
+							"type": "response.output_text.delta", "item_id": st.messageID,
+							"output_index": outputIndex, "content_index": contentIndex, "delta": chunk,
+						}))
+					}
 				}
 			case "input_json_delta":
 				toolUse := st.toolUseByIndex[idx]
@@ -314,6 +352,7 @@ func convertMessagesSSE(text string, st *messagesSSEState) string {
 				for k, v := range toolUse.item {
 					item[k] = v
 				}
+				item["status"] = "completed"
 				if toolUse.custom {
 					// custom_tool_call 的载荷是顶层 input 纯文本，不是 arguments JSON 串
 					input := customToolInputText(parseToolInput(argumentsText))
@@ -336,11 +375,28 @@ func convertMessagesSSE(text string, st *messagesSSEState) string {
 				}))
 				continue
 			}
+			// 非 tool_use 块：只有 text 块才发 content_part.done 收尾。
+			// thinking/redacted_thinking/image 等块在 content_block_start/delta 从未被
+			// 下发（正文直接丢弃、无 content_part.added），这里若照文本分支处理会给
+			// 客户端一个没有 .added 配对的孤儿 content_part.done，且 content_index 错位。
+			if st.blockTypeByIndex[idx] != "text" {
+				continue
+			}
 			contentIndex := st.contentIndexForBlock(idx)
+			// 收尾：把未处理尾部按收尾规则清洗后补发为最后一段 delta（保证增量流完整），
+			// 再发 content_part.done。finalizeSanitize 会丢弃未闭合 think 区段。
+			full := st.contentTextByIndex[idx]
+			if tail := finalizeSanitize(full[st.rawConsumedByIndex[idx]:]); tail != "" {
+				out.WriteString(sseFrame("response.output_text.delta", map[string]any{
+					"type": "response.output_text.delta", "item_id": st.messageID,
+					"output_index": st.ensureMessageOutputIndex(), "content_index": contentIndex, "delta": tail,
+				}))
+			}
+			st.rawConsumedByIndex[idx] = len(full)
 			out.WriteString(sseFrame("response.content_part.done", map[string]any{
 				"type": "response.content_part.done", "item_id": st.messageID,
 				"output_index": st.ensureMessageOutputIndex(), "content_index": contentIndex,
-				"part": map[string]any{"type": "output_text", "text": sanitizeAssistantText(st.contentTextByIndex[idx]), "annotations": []any{}},
+				"part": map[string]any{"type": "output_text", "text": finalizeSanitize(full), "annotations": []any{}},
 			}))
 
 		case eventType == "message_delta":
@@ -352,8 +408,9 @@ func convertMessagesSSE(text string, st *messagesSSEState) string {
 				errPayload = parsed
 			}
 			out.WriteString(sseFrame("response.failed", map[string]any{
-				"type":     "response.failed",
-				"response": map[string]any{"id": st.responseID, "status": "failed", "error": errPayload},
+				"type": "response.failed",
+				"response": map[string]any{"id": st.responseID, "object": "response", "status": "failed",
+					"created_at": st.createdAt, "error": errPayload},
 			}))
 			out.WriteString("data: [DONE]\n\n")
 			st.done = true // 终态：后续 message_stop 不能再翻成 completed
@@ -362,7 +419,7 @@ func convertMessagesSSE(text string, st *messagesSSEState) string {
 			content := []any{}
 			for _, idx := range sortedContentIndexes(st.contentTextByIndex) {
 				content = append(content, map[string]any{
-					"type": "output_text", "text": sanitizeAssistantText(st.contentTextByIndex[idx]), "annotations": []any{},
+					"type": "output_text", "text": finalizeSanitize(st.contentTextByIndex[idx]), "annotations": []any{},
 				})
 			}
 			if len(content) > 0 || len(st.toolUseByIndex) == 0 {
@@ -372,7 +429,8 @@ func convertMessagesSSE(text string, st *messagesSSEState) string {
 				}))
 			}
 			// stop_reason=max_tokens 也按 completed 收尾（Codex 把 incomplete 当失败轮次）
-			response := map[string]any{"id": st.responseID, "object": "response", "status": "completed", "model": st.model}
+			response := map[string]any{"id": st.responseID, "object": "response", "status": "completed", "model": st.model,
+				"created_at": st.createdAt}
 			if st.inputTokens > 0 || st.outputTokens > 0 {
 				response["usage"] = map[string]any{
 					"input_tokens": st.inputTokens, "output_tokens": st.outputTokens,

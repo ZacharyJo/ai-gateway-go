@@ -169,9 +169,80 @@ func neutralizeAssistantTextBlocks(content []any) []any {
 
 var minimaxLeakPattern = regexp.MustCompile(`(?i)(?:\s*[\]|｜]?<\]minimax\[>\[)+`)
 
-// sanitizeAssistantText 去掉 minimax 模型泄漏的内部标记。
+// thinkTagPattern 匹配完整的 <think>...</think> 块和残留的开/闭标签。
+// 部分 Messages 上游会把思考内容以文本块返回，正文里不应出现这些标签。
+var thinkTagPattern = regexp.MustCompile(`(?is)<think\b[^>]*>.*?</think>|<think\b[^>]*>|</think>`)
+
+// thinkTagOnlyPattern 只剥标签、保留标签间的思考正文（reasoning 字段用）。
+var thinkTagOnlyPattern = regexp.MustCompile(`(?is)<think\b[^>]*>|</think>`)
+
+// sanitizeAssistantText 去掉 minimax 模型泄漏的内部标记与 <think> 标签。
 func sanitizeAssistantText(text string) string {
+	text = thinkTagPattern.ReplaceAllString(text, "")
 	return minimaxLeakPattern.ReplaceAllString(text, "")
+}
+
+// —— 流式内部标记清洗（跨 chunk 安全） ——
+//
+// 逐 chunk 下发正文时，<think>…</think> 或 minimax 泄漏标记可能被切在两个 chunk
+// （如 "<thi" + "nk>"），逐块 sanitizeAssistantText 都匹配不到，原始片段就流给客户端
+// 实时渲染了（仅收尾那次全量清洗才补救，但那时已经显示出去）。streamSafeSplit 从累计
+// 原文里切出"稳定前缀"（可安全清洗后下发）与需继续缓冲的尾部：尾部要么是某内部标记的
+// 部分前缀，要么是尚未闭合的 <think> 区段。
+var thinkOpenScan = regexp.MustCompile(`(?i)<think\b`)
+var thinkCloseScan = regexp.MustCompile(`(?i)</think\s*>`)
+
+// streamSafeSplit 返回可安全下发的稳定原文前缀与需继续缓冲的尾部。
+func streamSafeSplit(s string) (safe, hold string) {
+	// 1) 未闭合的 <think>：从最后一个未匹配 </think> 的 <think 起全部缓冲，
+	//    避免在闭合标签到达前把思考正文当作正文下发。
+	if i := unclosedThinkStart(s); i >= 0 {
+		return s[:i], s[i:]
+	}
+	// 2) 结尾可能是标记的部分前缀：从该 '<' 起缓冲，等后续 chunk 补全再判定。
+	if i := trailingMarkerPrefix(s); i >= 0 {
+		return s[:i], s[i:]
+	}
+	return s, ""
+}
+
+// unclosedThinkStart 返回最后一个未闭合 <think 的起始下标；全部闭合或无 think 返回 -1。
+func unclosedThinkStart(s string) int {
+	opens := thinkOpenScan.FindAllStringIndex(s, -1)
+	if len(opens) == 0 {
+		return -1
+	}
+	lastOpen := opens[len(opens)-1][0]
+	for _, c := range thinkCloseScan.FindAllStringIndex(s, -1) {
+		if c[0] > lastOpen {
+			return -1 // 最后一个 <think 已闭合
+		}
+	}
+	return lastOpen
+}
+
+// trailingMarkerPrefix 返回结尾处"可能长成完整标记"的 '<' 下标；否则 -1。
+func trailingMarkerPrefix(s string) int {
+	i := strings.LastIndexByte(s, '<')
+	if i < 0 {
+		return -1
+	}
+	tail := strings.ToLower(s[i:])
+	for _, marker := range []string{"<think", "</think>", "<]minimax[>["} {
+		if len(tail) < len(marker) && strings.HasPrefix(marker, tail) {
+			return i
+		}
+	}
+	return -1
+}
+
+// finalizeSanitize 收尾清洗：先丢弃尾部未闭合的 <think> 区段（EOF 视为思考未完，不下发），
+// 再做常规清洗。用于流结束/内容块收尾，保证累计文本与流式下发口径一致。
+func finalizeSanitize(s string) string {
+	if i := unclosedThinkStart(s); i >= 0 {
+		s = s[:i]
+	}
+	return sanitizeAssistantText(s)
 }
 
 // freeform（type=custom）工具在 Messages 侧的承载方式。

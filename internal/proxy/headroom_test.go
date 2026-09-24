@@ -396,7 +396,8 @@ func TestRawRewriteLocate(t *testing.T) {
 	}
 	// 改写 index 1，其余字节不变
 	stat := &CandidateStat{Path: "$.input[1].output"}
-	out := rewriteAcceptedOutputsRaw([]byte(body), []*CandidateStat{stat}, map[string]string{stat.Path: "compressed-value"})
+	out := rewriteAcceptedOutputsRaw([]byte(body), []*CandidateStat{stat},
+		map[string]string{stat.Path: "compressed-value"}, map[string]string{stat.Path: "def"})
 	got := string(out)
 	if !strings.Contains(got, `"output":"compressed-value"`) {
 		t.Errorf("rewrite failed: %s", got)
@@ -414,10 +415,30 @@ func TestRewriteAcceptedOutputsOverlap(t *testing.T) {
 	// 两个替换区间不应重叠（这里各自独立，应成功）
 	stats := []*CandidateStat{{Path: "$.input[0].output"}, {Path: "$.input[1].output"}}
 	reps := map[string]string{"$.input[0].output": "AAA", "$.input[1].output": "BBB"}
-	if out := rewriteAcceptedOutputsRaw([]byte(body), stats, reps); out == nil {
+	orig := map[string]string{"$.input[0].output": "abc", "$.input[1].output": "def"}
+	if out := rewriteAcceptedOutputsRaw([]byte(body), stats, reps, orig); out == nil {
 		t.Fatal("non-overlapping rewrite returned nil")
 	} else if !strings.Contains(string(out), `"output":"BBB"`) {
 		t.Errorf("second replacement missing: %s", out)
+	}
+}
+
+// TestRewriteAcceptedOutputsRejectsDuplicateKey 验证 JSON 重复 output 键时 raw 改写拒绝
+// （Unmarshal 取最后一个值、字节定位器找第一个，区间不可靠 → 回退整体重序列化）。
+func TestRewriteAcceptedOutputsRejectsDuplicateKey(t *testing.T) {
+	body := `{"input":[{"type":"function_call_output","output":"AAA","output":"BBB"}]}`
+	stat := &CandidateStat{Path: "$.input[0].output"}
+	reps := map[string]string{stat.Path: "compressed"}
+	// 分析器（Unmarshal）取到的原文是最后一个键 "BBB"，与字节定位器找到的第一个 "AAA" 不一致 → nil
+	if out := rewriteAcceptedOutputsRaw([]byte(body), []*CandidateStat{stat}, reps,
+		map[string]string{stat.Path: "BBB"}); out != nil {
+		t.Errorf("duplicate-key rewrite should return nil, got %s", out)
+	}
+	// 无重复键且原文一致：正常改写
+	bodyOK := `{"input":[{"type":"function_call_output","output":"BBB"}]}`
+	if out := rewriteAcceptedOutputsRaw([]byte(bodyOK), []*CandidateStat{stat}, reps,
+		map[string]string{stat.Path: "BBB"}); out == nil {
+		t.Error("clean rewrite should succeed")
 	}
 }
 

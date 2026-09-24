@@ -48,9 +48,27 @@ func parseSearchLine(line string) *searchMatch {
 		if err != nil {
 			return nil
 		}
-		return &searchMatch{file: line[:i], lineNumber: num, separator: string(sep), content: line[j+1:], original: line}
+		file := line[:i]
+		// 时间戳/纯数字行（如 "2026-09-23 10:15:30"）会被误判成 file:"2026" line:9，
+		// 从而把日志当搜索结果、月份前导零被丢、内容被激进截断。校验 file 部分含字母
+		//（代码路径都有），不满足则继续找下一个分隔符（压缩兜底走 log 分支，不丢内容）。
+		if !containsASCILetter(file) {
+			continue
+		}
+		return &searchMatch{file: file, lineNumber: num, separator: string(sep), content: line[j+1:], original: line}
 	}
 	return nil
+}
+
+// containsASCILetter 判断字符串是否含至少一个 ASCII 字母（搜索结果的 file 部分通常是
+// 代码路径；纯数字/日期样式的 file 是时间戳误判信号）。
+func containsASCILetter(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if isASCIILetter(s[i]) {
+			return true
+		}
+	}
+	return false
 }
 
 func isASCIILetter(b byte) bool {

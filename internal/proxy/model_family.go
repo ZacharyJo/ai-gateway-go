@@ -8,7 +8,9 @@ import (
 // 模型族识别：
 // GPT 系走 Responses 原样透传；非 GPT 走 Responses→Messages（Anthropic 风格）适配。
 
-var gptModelPattern = regexp.MustCompile(`(?i)^gpt(?:-|_|$)`)
+// 匹配 GPT 系：连字符/下划线/数字/结尾，或「空格+数字」（覆盖展示名 "GPT 5.6 Luna"）。
+// 空格后必须跟数字：`gpt j`（EleutherAI 式空格拼写、非版本号）不会被误判成 GPT 系。
+var gptModelPattern = regexp.MustCompile(`(?i)^gpt(?:-|_|$|\d|\s\d)`)
 
 // isGptModel 判断是否 GPT 系模型（原样透传 Responses 协议）。
 func isGptModel(model string) bool {

@@ -703,6 +703,161 @@ func TestForwardImageFallbackNotRetriggered(t *testing.T) {
 	}
 }
 
+func TestForwardThinkingSignatureFallback(t *testing.T) {
+	clearProxyEnv(t)
+	var attempts atomic.Int32
+	var sent string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempts.Add(1)
+		if n == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":{"message":"messages.1.content.0: Invalid 'signature' in 'thinking' block"}}`))
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		sent = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(b)
+	}))
+	defer upstream.Close()
+
+	up := newTestUpstream(t, testConfig(upstream.URL))
+	// 原生 /v1/messages 透传请求携带 thinking 块与 signature。
+	reqBody := `{
+		"model":"claude sonnet 5",
+		"messages":[
+			{"role":"assistant","content":[{"type":"thinking","thinking":"t","signature":"sig"}]},
+			{"role":"user","content":"ok"}
+		]
+	}`
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(reqBody))
+	rr := httptest.NewRecorder()
+	res, err := up.Forward(req.Context(), rr, req, 1)
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if res.Status != http.StatusOK {
+		t.Errorf("Status = %d, want 200（整流后应重试成功）", res.Status)
+	}
+	if attempts.Load() != 2 {
+		t.Errorf("server hits = %d, want 2（一次 400 + 一次整流重试）", attempts.Load())
+	}
+	if strings.Contains(sent, `"signature"`) {
+		t.Errorf("重试请求仍含 signature: %s", sent)
+	}
+}
+
+func TestForwardThinkingBudgetFallback(t *testing.T) {
+	clearProxyEnv(t)
+	var attempts atomic.Int32
+	var sent string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempts.Add(1)
+		if n == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":{"message":"thinking.budget_tokens: Input should be greater than or equal to 1024"}}`))
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		sent = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(b)
+	}))
+	defer upstream.Close()
+
+	cfg := testConfig(upstream.URL)
+	cfg.MaxAttempts = 1 // 禁用 HTTP 重试，确保成功来自整流而不是普通重试
+	up := newTestUpstream(t, cfg)
+	reqBody := `{
+		"model":"claude sonnet 5",
+		"thinking":{"type":"enabled","budget_tokens":512},
+		"max_tokens":1024,
+		"messages":[{"role":"user","content":"hello"}]
+	}`
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(reqBody))
+	rr := httptest.NewRecorder()
+	res, err := up.Forward(req.Context(), rr, req, 1)
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if res.Status != http.StatusOK {
+		t.Errorf("Status = %d, want 200（budget 整流后应重试成功）", res.Status)
+	}
+	if attempts.Load() != 2 {
+		t.Errorf("server hits = %d, want 2（一次 400 + 一次整流重试）", attempts.Load())
+	}
+	if !strings.Contains(sent, `"budget_tokens":32000`) {
+		t.Errorf("重试请求未带上 32000 budget_tokens: %s", sent)
+	}
+}
+
+func TestForwardThinkingFallbackNotRetriggered(t *testing.T) {
+	clearProxyEnv(t)
+	var attempts atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":{"message":"Invalid 'signature' in 'thinking' block"}}`))
+	}))
+	defer upstream.Close()
+
+	cfg := testConfig(upstream.URL)
+	cfg.MaxAttempts = 1
+	up := newTestUpstream(t, cfg)
+	reqBody := `{"model":"claude sonnet 5","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"t","signature":"sig"}]}]}`
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(reqBody))
+	rr := httptest.NewRecorder()
+	if _, err := up.Forward(req.Context(), rr, req, 1); err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if attempts.Load() != 2 {
+		t.Errorf("server hits = %d, want 2（整流仅触发一次）", attempts.Load())
+	}
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("rr.Code = %d, want 400（最终交付上游错误）", rr.Code)
+	}
+}
+
+func TestForwardThinkingFallbackNativeMessagesPath(t *testing.T) {
+	// 原生 /v1/messages 透传时也应整流（不依赖适配器上下文）。
+	clearProxyEnv(t)
+	var attempts atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempts.Add(1)
+		if n == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":{"message":"Invalid 'signature' in 'thinking' block"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	cfg := testConfig(upstream.URL)
+	cfg.MaxAttempts = 1
+	up := newTestUpstream(t, cfg)
+	reqBody := `{"model":"claude sonnet 5","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"t","signature":"sig"}]}]}`
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(reqBody))
+	rr := httptest.NewRecorder()
+	if _, err := up.Forward(req.Context(), rr, req, 1); err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if attempts.Load() != 2 {
+		t.Errorf("server hits = %d, want 2（原生 Messages 也整流重试）", attempts.Load())
+	}
+	if rr.Code != http.StatusOK {
+		t.Errorf("rr.Code = %d, want 200", rr.Code)
+	}
+}
+
 // TestAdaptErrorBody 验证适配路径的错误体逆转换：
 // Anthropic Messages 错误包成 Responses 顶层 error 形态，Chat（已是 {"error":{...}}）幂等。
 func TestAdaptErrorBody(t *testing.T) {

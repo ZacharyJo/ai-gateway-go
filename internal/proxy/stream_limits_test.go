@@ -32,6 +32,11 @@ func TestRetryableKindFromSSE(t *testing.T) {
 			`data: {"type":"error","error":{"message":"Our servers are currently overloaded, please try again later."}}` + "\n\n",
 			"model_capacity",
 		},
+		{
+			"fingerprint replay cooldown is terminal",
+			`data: {"type":"error","error":{"code":"fingerprint_replay_cooldown","message":"相同 Prompt 指纹近期已收到上游，当前请求进入精确重放冷却"}}` + "\n\n",
+			"fingerprint_cooldown",
+		},
 		// 只命中一半短语不算（避免误判正常错误）
 		{
 			"half phrase not enough",
@@ -116,5 +121,56 @@ func TestCollectErrorTextsOnlyInsideErrorContainers(t *testing.T) {
 	}
 	if strings.Contains(joined, "response.output_text.delta") || strings.Contains(joined, "some text") {
 		t.Errorf("collected text outside error container: %v", texts)
+	}
+}
+
+func TestStreamSSETerminalCooldownNoOverloadedFrame(t *testing.T) {
+	// 终态错误（指纹重放冷却）：不追加 server_overloaded 帧（否则诱导客户端重试撞冷却），
+	// 但已随流转发的上游原始错误内容保留。
+	upstreamSSE := `data: {"type":"response.output_text.delta","delta":"partial"}` + "\n\n" +
+		`data: {"type":"error","error":{"code":"fingerprint_replay_cooldown","message":"进入精确重放冷却，剩余约 25 分钟"}}` + "\n\n"
+	rr := httptest.NewRecorder()
+	kind, _ := streamSSE(rr, strings.NewReader(upstreamSSE), true)
+	if kind != "fingerprint_cooldown" {
+		t.Fatalf("kind = %q, want fingerprint_cooldown", kind)
+	}
+	if !isTerminalStreamErrorKind(kind) {
+		t.Errorf("kind %q should be classified terminal", kind)
+	}
+	body := rr.Body.String()
+	if strings.Contains(body, "server_overloaded") {
+		t.Errorf("terminal error must NOT inject server_overloaded (would trigger client retry): %q", body)
+	}
+	if !strings.Contains(body, "fingerprint_replay_cooldown") {
+		t.Errorf("upstream terminal error content should pass through: %q", body)
+	}
+}
+
+func TestStreamSSEChatSoftErrorStopsCleanly(t *testing.T) {
+	// 上游把并发超限软错误塞进 200 的 Chat SSE 流。检测命中时：
+	//   - 非终态：发 server_overloaded 帧 + [DONE] 干净收尾，**不**把原始 Chat chunk 透传
+	//     进 Responses 流（那会把 Chat Completions JSON 混进 Responses 协议）；
+	//   - 客户端拿到 server_overloaded 即重试，不需要看底层错误正文（终态错误才透传原始帧）。
+	chatSSE := `data: {"choices":[{"delta":{"content":"hi"}}]}` + "\n\n" +
+		`data: {"error":{"message":"Concurrency limit exceeded for account abc, please retry later."}}` + "\n\n"
+	rr := httptest.NewRecorder()
+	tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+	kind, truncated := streamSSEChat(rr, strings.NewReader(chatSSE), tr)
+	if kind != "concurrency_limit" {
+		t.Fatalf("kind = %q, want concurrency_limit", kind)
+	}
+	if truncated {
+		t.Error("soft error should not be flagged truncated")
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `"code":"server_overloaded"`) {
+		t.Errorf("overloaded frame not written: %q", body)
+	}
+	if !strings.HasSuffix(body, "data: [DONE]\n\n") {
+		t.Errorf("soft error should end with clean [DONE]: %q", body)
+	}
+	// 原始 Chat JSON（错误正文与同 chunk 的正常内容）不应混进 Responses 流。
+	if strings.Contains(body, "Concurrency limit exceeded") || strings.Contains(body, `"content":"hi"`) {
+		t.Errorf("raw Chat chunk leaked into Responses stream on soft error: %q", body)
 	}
 }

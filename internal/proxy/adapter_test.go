@@ -15,8 +15,10 @@ func TestIsGptModel(t *testing.T) {
 		{"gpt_4", true},
 		{"gpt", true},
 		{"GPT-5", true},
+		{"GPT 5.6 Luna", true},
 		{"  gpt-5.6  ", true},
 		{"gpts", false},
+		{"gpt j", false},
 		{"claude sonnet 5", false},
 		{"glm-4.7", false},
 		{"", false},
@@ -612,6 +614,12 @@ func TestNeutralizeOnlyRewritesMatchingBlocks(t *testing.T) {
 func TestSanitizeAssistantText(t *testing.T) {
 	if got := sanitizeAssistantText("hello<]minimax[>["); got != "hello" {
 		t.Errorf("sanitize = %q, want hello", got)
+	}
+	if got := sanitizeAssistantText("<think>思考</think>正文"); got != "正文" {
+		t.Errorf("sanitize = %q, want 正文", got)
+	}
+	if got := sanitizeAssistantText("</think>正文"); got != "正文" {
+		t.Errorf("sanitize = %q, want 正文", got)
 	}
 	if got := sanitizeAssistantText("plain text"); got != "plain text" {
 		t.Errorf("sanitize changed clean text: %q", got)

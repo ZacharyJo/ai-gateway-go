@@ -50,6 +50,26 @@ func TestServerDashboardRoute(t *testing.T) {
 	}
 }
 
+func TestServerRejectsDotDotPath(t *testing.T) {
+	s := newTestServer(t, testConfig("http://127.0.0.1:1"))
+	// 路径穿越防护：任何含 .. 段的路径直接 400，不能转发到上游
+	// （否则 /v1/../../api/... 会带凭据逃出 /v1 作用域打到上游任意端点）
+	paths := []string{
+		"/v1/../admin",
+		"/v1/../../api/any-endpoint",
+		"/v1/foo/../bar",
+		"/../etc/passwd",
+		"/v1/%2e%2e/%2e%2e/admin", // 百分号编码的 ..，Go 会解码进 URL.Path
+	}
+	for _, path := range paths {
+		rr := httptest.NewRecorder()
+		s.ServeHTTP(rr, httptest.NewRequest("POST", path, strings.NewReader(`{}`)))
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("%q: code = %d, want 400", path, rr.Code)
+		}
+	}
+}
+
 func TestServerStatsRoute(t *testing.T) {
 	s := newTestServer(t, testConfig("http://127.0.0.1:1"))
 	rr := httptest.NewRecorder()
@@ -108,12 +128,18 @@ func TestServerHeadroomOriginalRouteRejectsBadHash(t *testing.T) {
 	cfg := testConfig("http://127.0.0.1:1")
 	cfg.Headroom = HeadroomConfig{Mode: "on", Apply: true, StoreDir: t.TempDir(), MinChars: 512}
 	s := newTestServer(t, cfg)
-	// 非 64 位 hex 一律 404（防路径穿越）
-	for _, hash := range []string{"zzz", "../../etc/passwd", strings.Repeat("g", 64)} {
+	// 非 64 位 hex 一律 404（readOriginal 的 ^[a-f0-9]{64}$ 防路径穿越兜底）
+	for _, hash := range []string{"zzz", strings.Repeat("g", 64)} {
 		rr := httptest.NewRecorder()
 		s.ServeHTTP(rr, httptest.NewRequest("GET", "/headroom-lite/"+hash, nil))
 		if rr.Code != http.StatusNotFound {
 			t.Errorf("hash %q: code = %d, want 404", hash, rr.Code)
 		}
+	}
+	// 含 .. 段的路径由外层路径穿越 guard 直接 400 拦截（ServeHTTP 顶层的 hasDotDotSegment）
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, httptest.NewRequest("GET", "/headroom-lite/../../etc/passwd", nil))
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("traversal path: code = %d, want 400", rr.Code)
 	}
 }

@@ -228,7 +228,10 @@ func parseInputIndex(path string) int {
 }
 
 // rewriteAcceptedOutputsRaw 在原始字节上做非重叠区间替换；任一定位失败或区间重叠返回 nil。
-func rewriteAcceptedOutputsRaw(body []byte, accepted []*CandidateStat, replacementsByPath map[string]string) []byte {
+// originalsByPath 是每个路径被分析器压缩的**原始值**：JSON 重复键时 json.Unmarshal 取
+// 最后一个、字节定位器 findObjectProperty 找第一个，两者不一致说明区间不可靠，
+// 返回 nil 让调用方回退整体重序列化（避免把第一个键替换成第二个值的压缩文本）。
+func rewriteAcceptedOutputsRaw(body []byte, accepted []*CandidateStat, replacementsByPath, originalsByPath map[string]string) []byte {
 	text := string(body)
 	type replacement struct {
 		start, end int
@@ -241,8 +244,12 @@ func rewriteAcceptedOutputsRaw(body []byte, accepted []*CandidateStat, replaceme
 		if index < 0 || !ok {
 			return nil
 		}
-		start, end, _, ok := findInputOutputStringRange([]byte(text), index)
+		start, end, litValue, ok := findInputOutputStringRange([]byte(text), index)
 		if !ok {
+			return nil
+		}
+		// 定位到的字面量必须等于分析用的原文（重复键场景二者会不同）。
+		if want, ok := originalsByPath[stat.Path]; ok && want != litValue {
 			return nil
 		}
 		reps = append(reps, replacement{start: start, end: end, repl: jsonStringify(repl)})

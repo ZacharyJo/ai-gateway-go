@@ -47,11 +47,10 @@ func TestRetryPolicyRetryAfterMs(t *testing.T) {
 		{"no header attempt 1", "", 1, 1000 * time.Millisecond},
 		{"no header attempt 2", "", 2, 2000 * time.Millisecond},
 		{"no header attempt 5 capped", "", 5, 4000 * time.Millisecond}, // step=5000 > max
-		{"retry-after seconds shorter", "1", 2, 1000 * time.Millisecond},
-		{"retry-after seconds longer ignored", "10", 1, 1000 * time.Millisecond},
-		// 注意 http.TimeFormat 按 GMT 输出：必须用 UTC 时间构造，避免本地时区偏移导致"过去"变"未来"
-		{"retry-after date future", now.UTC().Add(10 * time.Second).Format(http.TimeFormat), 1, 1000 * time.Millisecond},
-		{"retry-after date past -> 0", now.UTC().Add(-time.Hour).Format(http.TimeFormat), 2, 0},
+		{"retry-after shorter than backoff -> keep backoff", "1", 2, 2000 * time.Millisecond},
+		{"retry-after longer honored (min-wait semantics)", "10", 1, 10 * time.Second},
+		{"retry-after huge capped at 60s", "600", 1, 60 * time.Second},
+		{"retry-after date past -> 0", now.UTC().Add(-time.Hour).Format(http.TimeFormat), 2, 2000 * time.Millisecond},
 		{"garbage ignored", "abc", 2, 2000 * time.Millisecond},
 	}
 	for _, c := range cases {

@@ -294,3 +294,44 @@ func TestForwardReasoningOnlyBufferExceededPassesThrough(t *testing.T) {
 		t.Error("nothing delivered on buffer-exceeded path")
 	}
 }
+
+func TestForwardReasoningOnlyDeliversRepairedTools(t *testing.T) {
+	// 上游把 custom 工具降级成 function_call（tool_shape 要修的故障）
+	degraded := strings.Join([]string{
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","name":"exec","id":"fc_1","arguments":""}}`, ``,
+		`data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"input\":\"git di"}`,
+		`data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"ff\"}"}`,
+		`data: {"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":"{\"input\":\"git diff\"}"}`, ``,
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","name":"exec","id":"fc_1","arguments":"{\"input\":\"git diff\"}"}}`, ``,
+		`data: {"type":"response.completed","response":{"id":"resp_1","output":[{"type":"function_call","name":"exec","id":"fc_1","arguments":"{\"input\":\"git diff\"}"}]}}`, ``,
+		"data: [DONE]", ``,
+	}, "\n")
+	var hits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(degraded))
+	}))
+	defer upstream.Close()
+
+	up := newTestUpstream(t, reasoningTestConfig(upstream.URL))
+	// 资格命中（gpt-5.6 + 末项待执行工具输出）且声明 custom 工具 exec。
+	// eligible 交付必须走与流式路径相同的 tool_shape 修理，否则客户端收到降级的 function_call。
+	body := `{"model":"gpt-5.6-terra","stream":true,"tools":[{"type":"custom","name":"exec"}],"input":[{"type":"function_call_output","call_id":"c1","output":"x"}]}`
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	if _, err := up.Forward(req.Context(), rr, req, 1); err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if hits.Load() != 1 {
+		t.Errorf("upstream hits = %d, want 1 (actionable → no semantic retry)", hits.Load())
+	}
+	out := rr.Body.String()
+	if !strings.Contains(out, `"custom_tool_call"`) {
+		t.Errorf("eligible buffered delivery should repair degraded function_call:\n%s", out)
+	}
+	if strings.Contains(out, `"type":"function_call"`) {
+		t.Errorf("degraded function_call not repaired in eligible delivery:\n%s", out)
+	}
+}
