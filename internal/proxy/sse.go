@@ -8,6 +8,9 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // doneLinePattern 匹配 SSE 的 [DONE] 收尾行（data: [DONE] 或 data:[DONE]），
@@ -108,13 +111,15 @@ func streamSSEUsage(w http.ResponseWriter, body io.Reader, doneNet bool, transfo
 			rc.Flush()
 		}
 	}
-	if doneNet && clean {
+	if doneNet {
+		// 干净结束或截断都补 [DONE]：截断时同样不能让客户端拿断尾流挂死。
+		// codex 按 response.completed 判定轮次完成，[DONE] 只终止传输、不误判成功。
 		tracker.finish(w)
 	}
 	// 空流：上游 200 SSE 一个字节都没吐（含 reasoning 缓冲阶段被空闲超时/取消掐掉的情况）。
 	// 补 [DONE] 防止客户端挂死等待，并标记截断——调用方据此按失败终态记账（不计费），
-	// 而不是当成干净的 200 成功（内容一个字节都没交付）。
-	if clean && !tracker.sawData {
+	// 而不是当成干净的 200 成功（内容一个字节都没交付）。干净或截断的空流都算异常。
+	if !tracker.sawData {
 		if doneNet {
 			_, _ = w.Write([]byte("data: [DONE]\n\n"))
 			rc.Flush()
@@ -168,14 +173,14 @@ func streamSSEAdapted(w http.ResponseWriter, body io.Reader, t sseEventTransform
 			break
 		}
 	}
-	// 截断流（readErr != io.EOF）不调 Flush，避免把不完整的 pending 数据发给客户端
-	if isCleanStreamEnd(readErr) {
-		write(t.Flush())
-		tracker.finish(w)
-	}
+	// 截断流也调 Flush：pending 里的完整帧（差个换行没触发解析的收尾帧）冲刷出来，
+	// 不完整帧会被 parseSSEFrames 解析失败丢弃，不会把半截 JSON 发出去。
+	write(t.Flush())
+	// 干净结束或截断都统一收尾：有数据但上游没给 [DONE] 就补一帧，杜绝断尾流让客户端挂死。
+	tracker.finish(w)
 	// 空流：与透传路径一致——上游 200 SSE 一个字节都没吐时补 [DONE] 并标记截断，
-	// 否则 Messages 适配路径的客户端会挂死等待、且被按干净成功记账。
-	if isCleanStreamEnd(readErr) && !tracker.sawData {
+	// 否则 Messages 适配路径的客户端会挂死等待、且被按干净成功记账。干净或截断的空流都算异常。
+	if !tracker.sawData {
 		write("data: [DONE]\n\n")
 		return "", true
 	}
@@ -222,16 +227,55 @@ func streamSSEChatChained(w http.ResponseWriter, body io.Reader, t *ChatSSETrans
 	rc := http.NewResponseController(w)
 	buf := make([]byte, 32*1024)
 	detector := &streamErrorDetector{}
+	// 保活注释帧可能插在内容帧之间写回：并发写 http.ResponseWriter 需串行化。
+	var wMu sync.Mutex
 	write := func(s string) bool {
 		if s == "" {
 			return true
 		}
-		if _, err := w.Write([]byte(s)); err != nil {
-			return false
+		wMu.Lock()
+		_, err := w.Write([]byte(s))
+		if err == nil {
+			rc.Flush()
 		}
-		rc.Flush()
-		return true
+		wMu.Unlock()
+		return err == nil
 	}
+	// 长思考静默防护：内嵌 <thinking> 缓冲期转换器对 codex 零输出，客户端若按流空闲计时
+	// 会把长思考误判为断流。期间以 SSE 注释帧（协议忽略，仅保活）维持数据流。
+	// thinking 由主循环在每个 chunk 处理后置位，keepalive goroutine 只原子读，不碰转换器。
+	var thinking atomic.Bool
+	stopKeepalive := make(chan struct{})
+	keepaliveDone := make(chan struct{})
+	go func() {
+		defer close(keepaliveDone)
+		ticker := time.NewTicker(keepaliveInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopKeepalive:
+				return
+			case <-ticker.C:
+				if !thinking.Load() {
+					continue
+				}
+				wMu.Lock()
+				_, err := w.Write([]byte(keepaliveFrame))
+				if err == nil {
+					rc.Flush()
+				}
+				wMu.Unlock()
+				if err != nil {
+					return // 客户端已断开：停止保活
+				}
+			}
+		}
+	}()
+	defer func() {
+		close(stopKeepalive)
+		<-keepaliveDone // 主循环返回前确保 goroutine 退出，避免对已归还的连接写残留字节
+	}()
+
 	pending := ""
 	var readErr error
 	for {
@@ -244,16 +288,14 @@ func streamSSEChatChained(w http.ResponseWriter, body io.Reader, t *ChatSSETrans
 					// **不再原样透传原始 Chat chunk**——那是 Chat Completions JSON，混进
 					// Responses 流会协议污染；客户端拿到 server_overloaded 即重试，
 					// 不需要看底层错误正文。
-					_, _ = w.Write([]byte(overloadedErrorFrame))
-					_, _ = w.Write([]byte("data: [DONE]\n\n"))
-					rc.Flush()
+					write(overloadedErrorFrame)
+					write("data: [DONE]\n\n")
 					return k, false
 				}
 				// 终态错误（如指纹重放冷却）：把上游 Chat 错误转成 Responses 的 event: error 帧
 				// + [DONE] 干净收尾——不跨协议裸透传 Chat JSON；客户端拿到 error 帧按失败处理。
-				_, _ = w.Write([]byte(chatErrorFrame(string(buf[:n]))))
-				_, _ = w.Write([]byte("data: [DONE]\n\n"))
-				rc.Flush()
+				write(chatErrorFrame(string(buf[:n])))
+				write("data: [DONE]\n\n")
 				return k, false
 			}
 			// 按行切分处理 SSE data 行
@@ -277,6 +319,7 @@ func streamSSEChatChained(w http.ResponseWriter, body io.Reader, t *ChatSSETrans
 							return "", true // 客户端断开：算截断（监控非成功）
 						}
 					}
+					thinking.Store(t.BufferingThink())
 				}
 			}
 		}
@@ -295,18 +338,27 @@ func streamSSEChatChained(w http.ResponseWriter, body io.Reader, t *ChatSSETrans
 				out = second.Push(out)
 			}
 			write(out)
+			thinking.Store(t.BufferingThink())
 		}
 	}
-	if isCleanStreamEnd(readErr) {
-		if second != nil {
-			write(second.Push(t.Flush()))
-			write(second.Flush())
-		} else {
-			write(t.Flush())
-		}
+	// 干净结束或截断都冲刷转换器收尾：Flush 兜底未闭合 <think> 为正文、finalize reasoning、
+	// 补发 response.completed + [DONE]。截断时同样必须收尾——否则 codex 拿到一条没有终止帧的
+	// 断尾流，轮次永远挂起（"断开"）。t.done 已置位时 Flush 幂等返回空。
+	if second != nil {
+		write(second.Push(t.Flush()))
+		write(second.Flush())
+	} else {
+		write(t.Flush())
 	}
 	return "", !isCleanStreamEnd(readErr)
 }
+
+// keepaliveInterval 是长思考静默期的保活注释帧间隔：远小于常见流空闲超时（60s+），
+// 又足够低频避免思考期间刷出大量空帧。测试可临时改小以触发。
+var keepaliveInterval = 15 * time.Second
+
+// keepaliveFrame 是 SSE 注释帧（冒号开头，协议忽略），只用于维持连接活跃、防静默超时断连。
+const keepaliveFrame = ": keepalive\n\n"
 
 // isCleanStreamEnd 判断上游流是否**干净结束**（读到 EOF）。
 // 空闲超时取消 context、连接被 RST 等都会返回非 EOF 错误，属于截断。

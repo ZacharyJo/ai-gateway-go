@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // streamSSE 是测试专用的无 usage 嗅探包装（生产路径走 streamSSEUsage）。
@@ -144,8 +145,10 @@ func TestStreamSSEZeroNilReadDoesNotSpin(t *testing.T) {
 	}
 }
 
-func TestStreamSSETruncatedStreamGetsNoDone(t *testing.T) {
-	// A2 回归：读到真错误说明流是截断的，补 [DONE] 会让客户端把残缺响应当完整结果、不再重试
+func TestStreamSSETruncatedStreamGetsDone(t *testing.T) {
+	// 截断流兜底：读到一个字节都没吐、或吐了数据但没给 [DONE] 的截断流，都补 [DONE] 终止传输，
+	// 杜绝断尾流让客户端挂死。codex 按 response.completed 判定轮次完成，[DONE] 只终止传输、
+	// 不会把残缺响应误判成完整成功（此前不补正是担心这个，实际换来的是 codex 端挂起/断开）。
 	for _, tc := range []struct {
 		name string
 		err  error
@@ -157,30 +160,36 @@ func TestStreamSSETruncatedStreamGetsNoDone(t *testing.T) {
 		rr := httptest.NewRecorder()
 		_, _ = streamSSE(rr, &truncatedReader{data: []byte("data: partial\n\n"), err: tc.err}, true)
 		body := rr.Body.String()
-		if strings.Contains(body, "[DONE]") {
-			t.Errorf("%s：截断流被补了 [DONE]: %q", tc.name, body)
+		if !strings.HasSuffix(body, "data: [DONE]\n\n") {
+			t.Errorf("%s：截断流应补 [DONE] 收尾: %q", tc.name, body)
 		}
 		if !strings.Contains(body, "data: partial") {
 			t.Errorf("%s：已读到的数据没有转发: %q", tc.name, body)
 		}
 	}
-	// 对照：干净 EOF 仍然补
+	// 空截断流（一个字节都没吐）同样补 [DONE] 并标记截断
 	rr := httptest.NewRecorder()
+	_, _ = streamSSE(rr, &truncatedReader{data: nil, err: errors.New("connection reset by peer")}, true)
+	if !strings.HasSuffix(rr.Body.String(), "data: [DONE]\n\n") {
+		t.Errorf("空截断流应补 [DONE] 收尾: %q", rr.Body.String())
+	}
+	// 对照：干净 EOF 仍补
+	rr = httptest.NewRecorder()
 	_, _ = streamSSE(rr, &truncatedReader{data: []byte("data: full\n\n"), err: io.EOF}, true)
 	if !strings.HasSuffix(rr.Body.String(), "data: [DONE]\n\n") {
 		t.Errorf("干净结束的流应补 [DONE]: %q", rr.Body.String())
 	}
 }
 
-func TestStreamSSEAdaptedTruncatedStreamGetsNoDone(t *testing.T) {
-	// 适配路径同理：转换器已发出的帧照常转发，但不补收尾哨兵
+func TestStreamSSEAdaptedTruncatedStreamGetsDone(t *testing.T) {
+	// 适配路径同理：转换器已发出的帧照常转发，截断时补 [DONE] 终止传输、杜绝断尾流挂死
 	sse := "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"m\"}}\n\n"
 	rr := httptest.NewRecorder()
 	tr := newMessagesSSETransformer("m", nil)
 	_, _ = streamSSEAdapted(rr, &truncatedReader{data: []byte(sse), err: errors.New("connection reset by peer")}, tr)
 	body := rr.Body.String()
-	if strings.Contains(body, "[DONE]") {
-		t.Errorf("截断的适配流被补了 [DONE]: %q", body)
+	if !strings.HasSuffix(body, "data: [DONE]\n\n") {
+		t.Errorf("截断的适配流应补 [DONE] 收尾: %q", body)
 	}
 	if !strings.Contains(body, "response.created") {
 		t.Errorf("已转换的帧没有转发: %q", body)
@@ -222,5 +231,104 @@ func TestSSEDoneTrackerJsonTextWithDONEDoesNotSuppressFallback(t *testing.T) {
 	// 真正的 SSE 协议收尾行 → 不补
 	if got := feedFinish("data: hello\n\n", "data: [DONE]\n\n"); got != "" {
 		t.Errorf("真正的 [DONE] 行应阻止重复补帧: %q", got)
+	}
+}
+
+// TestStreamSSEChatTruncatedGetsTerminalFrame 验证截断流兜底：上游非 EOF 结束时，
+// 转换器被冲刷，codex 拿到 response.completed + [DONE] 的干净轮次终止，而不是断尾流。
+// 回归：此前截断不调 Flush、不发 [DONE]，codex 把没有终止帧的 200 流当"还没执行完"挂起。
+func TestStreamSSEChatTruncatedGetsTerminalFrame(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"连接被重置", errors.New("read tcp: connection reset by peer")},
+		{"空闲超时取消", context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			chunks := []string{
+				`data: {"id":"c","choices":[{"index":0,"delta":{"content":"<thinking>思考"}}]}` + "\n\n",
+				`data: {"id":"c","choices":[{"index":0,"delta":{"content":"</thinking>答案"}}]}` + "\n\n",
+			}
+			rr := httptest.NewRecorder()
+			tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+			_, truncated := streamSSEChat(rr, &truncatedReader{data: []byte(strings.Join(chunks, "")), err: tc.err}, tr)
+			if !truncated {
+				t.Error("截断应上报 truncated=true")
+			}
+			out := rr.Body.String()
+			if !strings.Contains(out, "response.completed") {
+				t.Errorf("截断流应补发 response.completed:\n%s", out)
+			}
+			if !strings.HasSuffix(out, "data: [DONE]\n\n") {
+				t.Errorf("截断流应以 [DONE] 收尾:\n%s", out)
+			}
+			if got := collectDeltaText(out, "response.output_text.delta"); got != "答案" {
+				t.Errorf("text = %q, want 答案\n%s", got, out)
+			}
+		})
+	}
+}
+
+// TestStreamSSEChatTruncatedMidThinkEmitsFallbackText 验证思考中途被掐断（无闭合标签）时，
+// 兜底 Flush 把缓冲的思考当正文下发，codex 不会拿到只有 reasoning、没有 message 的空轮。
+func TestStreamSSEChatTruncatedMidThinkEmitsFallbackText(t *testing.T) {
+	chunk := `data: {"id":"c","choices":[{"index":0,"delta":{"content":"<thinking>思考到一半被掐断"}}]}` + "\n\n"
+	rr := httptest.NewRecorder()
+	tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+	_, truncated := streamSSEChat(rr, &truncatedReader{data: []byte(chunk), err: errors.New("connection reset by peer")}, tr)
+	if !truncated {
+		t.Error("截断应上报 truncated=true")
+	}
+	out := rr.Body.String()
+	if got := collectDeltaText(out, "response.output_text.delta"); got != "思考到一半被掐断" {
+		t.Errorf("未闭合 think 应兜底成正文, got %q\n%s", got, out)
+	}
+	if !strings.Contains(out, "response.completed") || !strings.HasSuffix(out, "data: [DONE]\n\n") {
+		t.Errorf("截断流应补 response.completed + [DONE]:\n%s", out)
+	}
+}
+
+// blockReader 依次返回 data[i]，在返回第二个及以后的 chunk 前阻塞 wait——
+// 模拟上游长思考期间停顿（转换器缓冲 think、对客户端零输出）的窗口。
+type blockReader struct {
+	data  []string
+	wait  time.Duration
+	index int
+}
+
+func (r *blockReader) Read(p []byte) (int, error) {
+	if r.index >= len(r.data) {
+		return 0, io.EOF
+	}
+	chunk := r.data[r.index]
+	r.index++
+	if r.index > 1 {
+		time.Sleep(r.wait)
+	}
+	n := copy(p, chunk)
+	return n, nil
+}
+
+// TestStreamSSEChatKeepaliveDuringThink 验证长思考静默防护：think 缓冲期间流循环
+// 发 SSE 注释帧保活，杜绝客户端因流空闲超时误判断流。
+func TestStreamSSEChatKeepaliveDuringThink(t *testing.T) {
+	old := keepaliveInterval
+	keepaliveInterval = 5 * time.Millisecond
+	defer func() { keepaliveInterval = old }()
+
+	chunks := []string{
+		`data: {"id":"c","choices":[{"index":0,"delta":{"content":"<thinking>长思考"}}]}` + "\n\n",
+		`data: {"id":"c","choices":[{"index":0,"delta":{"content":"</thinking>正文"}}]}` + "\n\n",
+	}
+	rr := httptest.NewRecorder()
+	tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+	_, _ = streamSSEChat(rr, &blockReader{data: chunks, wait: 300 * time.Millisecond}, tr)
+	out := rr.Body.String()
+	if !strings.Contains(out, keepaliveFrame) {
+		t.Errorf("思考缓冲期应发保活注释帧:\n%q", out)
+	}
+	if !strings.Contains(out, "response.completed") {
+		t.Errorf("流应正常收尾:\n%s", out)
 	}
 }

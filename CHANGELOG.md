@@ -8,6 +8,11 @@
 
 - **未闭合 think 块不再吞掉答案**：`<thinking>` 未闭合（思考被 max_tokens 截断或模型漏打闭合标签）时，Chat 流式路径不再把整段缓冲转成 reasoning、Messages 路径不再从 `<thinking>` 起整体丢弃——一律去标签后按正文兜底下发，保证每轮都有 assistant message 收尾。修复前 codex 会看到"只有 reasoning 没有 message"的完成轮，当作一轮没执行完提前结束会话。
 
+### Changed
+
+- **截断流兜底（杜绝断尾流）**：上游流在结束哨兵之前以非 EOF 错误收场（空闲超时 / 连接 RST / 网关断流）时，不再给 codex 留一条没有终止帧的断尾流——Chat 适配路径冲刷转换器补发 `response.completed + [DONE]`（未闭合 `<thinking>` 一并按正文兜底），Messages 与透传路径补 `[DONE]` 终止传输。修复前 codex 会把这种流当成"还没执行完"的轮次挂起 / 断开。
+- **长思考静默防护**：内嵌 `<thinking>` 缓冲期间（代理对 codex 零输出）以 SSE 注释帧保持流活跃，杜绝客户端因流空闲超时把长思考误判为断流。
+
 ## [v0.2.2] - 2026-09-27
 
 ### Fixed

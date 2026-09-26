@@ -1338,6 +1338,12 @@ func (t *ChatSSETransformer) flushUsage(parsed map[string]any) {
 	}
 }
 
+// BufferingThink 报告当前是否处于内嵌 <think> 缓冲期。此期间转换器对下游零输出
+// （思考内容要等 </think> 闭合才下发），流循环据此决定是否发保活注释帧。
+func (t *ChatSSETransformer) BufferingThink() bool {
+	return t.inlineThink == inlineThinkReasoning
+}
+
 func (t *ChatSSETransformer) Flush() string {
 	if t.done {
 		return ""
