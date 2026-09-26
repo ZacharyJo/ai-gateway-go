@@ -2,6 +2,12 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)；main 合入使用 squash，每个 PR 对应一条记录。
 
+## [v0.2.3] - 2026-09-27
+
+### Fixed
+
+- **未闭合 think 块不再吞掉答案**：`<thinking>` 未闭合（思考被 max_tokens 截断或模型漏打闭合标签）时，Chat 流式路径不再把整段缓冲转成 reasoning、Messages 路径不再从 `<thinking>` 起整体丢弃——一律去标签后按正文兜底下发，保证每轮都有 assistant message 收尾。修复前 codex 会看到"只有 reasoning 没有 message"的完成轮，当作一轮没执行完提前结束会话。
+
 ## [v0.2.2] - 2026-09-27
 
 ### Fixed
