@@ -252,12 +252,12 @@ func trailingMarkerPrefix(s string) int {
 	return -1
 }
 
-// finalizeSanitize 收尾清洗：先丢弃尾部未闭合的 <think> 区段（EOF 视为思考未完，不下发），
-// 再做常规清洗。用于流结束/内容块收尾，保证累计文本与流式下发口径一致。
+// finalizeSanitize 收尾清洗：剥掉 <think> 标签但保留思考正文。用于流结束/内容块收尾，
+// 保证累计文本与流式下发口径一致。
+// 历史上这里会把"未闭合的 <think> 区段"整体丢弃（EOF 视为思考未完）；但思考被截断
+// （max_tokens）或模型漏打闭合标签时，答案很可能就跟在未闭合区段里，整体丢弃会让这一轮
+// 变成空回答而提前收尾。改成只剥标签、保留内容，宁可把截断的思考当正文兜底，也不能丢答案。
 func finalizeSanitize(s string) string {
-	if i := unclosedThinkStart(s); i >= 0 {
-		s = s[:i]
-	}
 	return sanitizeAssistantText(s)
 }
 
