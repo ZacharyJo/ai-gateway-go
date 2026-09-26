@@ -75,6 +75,27 @@ func TestMessagesSSEThinkMarkerSplitAcrossFramesNotLeaked(t *testing.T) {
 	}
 }
 
+// TestMessagesSSEUnclosedThinkNotDropped 验证 text 块里 <thinking> 未闭合（思考被截断或漏打
+// 闭合标签）时，正文不得从 <thinking> 起整体丢弃——否则这一轮会变成空回答提前收尾。
+// 回归：finalizeSanitize 从最后一个未闭合 <think 起把尾部内容全部丢弃，答案信息丢失。
+func TestMessagesSSEUnclosedThinkNotDropped(t *testing.T) {
+	sse := strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"m1","model":"m"}}`, ``,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`, ``,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello <thinking>secret answer"}}`, ``,
+		`data: {"type":"content_block_stop","index":0}`, ``,
+		`data: {"type":"message_stop"}`, ``,
+	}, "\n") + "\n"
+
+	out := pushAll(t, "m", sse)
+	if !strings.Contains(out, `"text":"Hello secret answer"`) {
+		t.Errorf("unclosed think must keep content after stripping tag, got:\n%s", out)
+	}
+	if strings.Contains(out, "<thinking") {
+		t.Errorf("think tag leaked into output:\n%s", out)
+	}
+}
+
 func TestMessagesSSETextFlow(t *testing.T) {
 	sse := strings.Join([]string{
 		`event: message_start`, `data: {"type":"message_start","message":{"id":"msg_1","model":"claude sonnet 5"}}`, ``,

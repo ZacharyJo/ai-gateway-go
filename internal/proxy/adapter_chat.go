@@ -1131,14 +1131,15 @@ func (t *ChatSSETransformer) flushInlineThink() string {
 			}
 			return out
 		}
-		// 无闭合 </think>：整段（去开标签）当思考。
-		reasoning, _ := stripLeadingThinkOpenTag(buffered)
-		if reasoning == "" {
+		// 无闭合 </think>：缓冲可能是思考被截断（max_tokens），也可能是漏了闭合标签但答案
+		// 已跟在后面。两种情况都无法可靠切分，一律去开标签后当正文兜底下发（并清洗残留
+		// think 标记），保证这一轮不会只剩 reasoning 而空手结束——codex 对没有 message
+		// 的完成轮会当作一轮没执行完就提前收尾。
+		text, _ := stripLeadingThinkOpenTag(buffered)
+		if text == "" {
 			return ""
 		}
-		out := t.pushReasoningDelta(reasoning)
-		out += t.finalizeReasoning()
-		return out
+		return t.pushTextDelta(sanitizeAssistantText(text))
 	}
 	return ""
 }

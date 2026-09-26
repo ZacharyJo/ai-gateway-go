@@ -161,6 +161,34 @@ func TestChatSSETransformerInlineThinkVariants(t *testing.T) {
 	}
 }
 
+// TestChatSSETransformerUnclosedThink 验证流式下 <thinking> 未闭合（思考被 max_tokens 截断，
+// 或模型漏打闭合标签）时，缓冲内容必须作为正文兜底下发，不能整段吞进 reasoning——
+// 否则这一轮只有 reasoning 没有 message，codex 会把"还没执行完"的轮次提前收尾。
+// 回归：v0.2.2 起 <thinking> 被识别为思考块，未闭合块在 flushInlineThink 被整个转成
+// reasoning，output_text 为空。
+func TestChatSSETransformerUnclosedThink(t *testing.T) {
+	tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+	var sse strings.Builder
+	for _, d := range []string{
+		"<thinking>正在思考这个问题",
+		"比较复杂，先给结论：答案是42",
+	} {
+		sse.WriteString(tr.Push(`{"id":"c","choices":[{"index":0,"delta":{"content":"` + d + `"},"finish_reason":null}]}`))
+	}
+	sse.WriteString(tr.Push(`{"id":"c","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`))
+	out := sse.String() + tr.Flush()
+	if got := collectDeltaText(out, "response.reasoning_summary_text.delta"); got != "" {
+		t.Errorf("unclosed think must NOT become reasoning, got %q", got)
+	}
+	want := "正在思考这个问题比较复杂，先给结论：答案是42"
+	if got := collectDeltaText(out, "response.output_text.delta"); got != want {
+		t.Errorf("text = %q, want %q\n%s", got, want, out)
+	}
+	if !strings.Contains(out, "response.completed") {
+		t.Errorf("round must complete with a message, got:\n%s", out)
+	}
+}
+
 // TestApplyChatToolChoiceEnums 验证 Chat 适配的 tool_choice 与 Messages 版对齐：
 // map 形式的 none/auto/required 枚举都被处理（此前只认命名工具）。
 func TestApplyChatToolChoiceEnums(t *testing.T) {
