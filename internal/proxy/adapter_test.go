@@ -621,8 +621,41 @@ func TestSanitizeAssistantText(t *testing.T) {
 	if got := sanitizeAssistantText("</think>正文"); got != "正文" {
 		t.Errorf("sanitize = %q, want 正文", got)
 	}
+	// <thinking> 变体与带空白的闭标签同样要剥干净（历史 bug：只认 <think> 字面量，
+	// <thinking> 整块穿透进正文，被 codex 当文本渲染）。
+	if got := sanitizeAssistantText("<thinking>思考</thinking>正文"); got != "正文" {
+		t.Errorf("sanitize = %q, want 正文", got)
+	}
+	if got := sanitizeAssistantText("答案</think >"); got != "答案" {
+		t.Errorf("sanitize = %q, want 答案", got)
+	}
 	if got := sanitizeAssistantText("plain text"); got != "plain text" {
 		t.Errorf("sanitize changed clean text: %q", got)
+	}
+}
+
+// TestStreamSafeSplitThinkVariants 验证跨 chunk 边界时 think 标签前缀会被缓冲住：
+// 半个标签若当正文下发，客户端会实时渲染出原始标记。
+// 回归：<thinking 前缀不在 marker 列表内，"<thinki" 这类尾部不被缓冲而直接下发。
+func TestStreamSafeSplitThinkVariants(t *testing.T) {
+	cases := []struct{ name, in, wantSafe, wantHold string }{
+		{"thinking open split", "text<thinki", "text", "<thinki"},
+		{"thinking close split", "a</thinkin", "a", "</thinkin"},
+		// 闭标签恰好切成完整标签名（缺 >）：不能放行，否则 "</thinking" 原样下发且清洗剥不掉。
+		{"thinking close exact split", "a</thinking", "a", "</thinking"},
+		// 完整的闭标签不该被缓冲：等长不命中，交给 sanitize 剥除。
+		{"closed thinking close tag", "a</thinking>", "a</thinking>", ""},
+		{"bare think open split", "x<think", "x", "<think"},
+		{"unclosed thinking block", "<thinking>abc", "", "<thinking>abc"},
+		{"closed thinking block", "<thinking>abc</thinking>done", "<thinking>abc</thinking>done", ""},
+		{"no marker", "plain", "plain", ""},
+	}
+	for _, c := range cases {
+		safe, hold := streamSafeSplit(c.in)
+		if safe != c.wantSafe || hold != c.wantHold {
+			t.Errorf("%s: streamSafeSplit(%q) = (%q,%q), want (%q,%q)",
+				c.name, c.in, safe, hold, c.wantSafe, c.wantHold)
+		}
 	}
 }
 

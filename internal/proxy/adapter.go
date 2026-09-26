@@ -169,12 +169,23 @@ func neutralizeAssistantTextBlocks(content []any) []any {
 
 var minimaxLeakPattern = regexp.MustCompile(`(?i)(?:\s*[\]|｜]?<\]minimax\[>\[)+`)
 
-// thinkTagPattern 匹配完整的 <think>...</think> 块和残留的开/闭标签。
+// thinkTagName 是 think 系标签的唯一定义：可选 ing 后缀，同时覆盖 <think> 与 <thinking>。
+//
+// 所有识别、剥离、扫描一律走这组正则，不要再另起正则或做字面量比较——历史上正是多处
+// 各自实现导致口径漂移：清洗用 `<think\b`（\b 单词边界使 <thinking> 的 k|i 不成立而漏掉
+// 整个标签），扫描容空白而清洗不容，最终 <thinking> 整块与 </think > 残留进正文。
+const thinkTagName = `think(?:ing)?`
+
+// thinkTagPattern 匹配完整的 think 块（连内容）与残留的开/闭标签。
 // 部分 Messages 上游会把思考内容以文本块返回，正文里不应出现这些标签。
-var thinkTagPattern = regexp.MustCompile(`(?is)<think\b[^>]*>.*?</think>|<think\b[^>]*>|</think>`)
+var thinkTagPattern = regexp.MustCompile(`(?is)<` + thinkTagName + `\b[^>]*>.*?</` + thinkTagName + `\s*>|<` + thinkTagName + `\b[^>]*>|</` + thinkTagName + `\s*>`)
 
 // thinkTagOnlyPattern 只剥标签、保留标签间的思考正文（reasoning 字段用）。
-var thinkTagOnlyPattern = regexp.MustCompile(`(?is)<think\b[^>]*>|</think>`)
+var thinkTagOnlyPattern = regexp.MustCompile(`(?is)<` + thinkTagName + `\b[^>]*>|</` + thinkTagName + `\s*>`)
+
+// thinkOpenTagPattern 匹配锚定在开头的完整开标签（含属性与空白）。
+// 用于取标签实际长度：标签可能带属性，不能再靠 len("<think>") 硬算偏移。
+var thinkOpenTagPattern = regexp.MustCompile(`(?i)^<` + thinkTagName + `\b[^>]*>`)
 
 // sanitizeAssistantText 去掉 minimax 模型泄漏的内部标记与 <think> 标签。
 func sanitizeAssistantText(text string) string {
@@ -189,8 +200,8 @@ func sanitizeAssistantText(text string) string {
 // 实时渲染了（仅收尾那次全量清洗才补救，但那时已经显示出去）。streamSafeSplit 从累计
 // 原文里切出"稳定前缀"（可安全清洗后下发）与需继续缓冲的尾部：尾部要么是某内部标记的
 // 部分前缀，要么是尚未闭合的 <think> 区段。
-var thinkOpenScan = regexp.MustCompile(`(?i)<think\b`)
-var thinkCloseScan = regexp.MustCompile(`(?i)</think\s*>`)
+var thinkOpenScan = regexp.MustCompile(`(?i)<` + thinkTagName + `\b`)
+var thinkCloseScan = regexp.MustCompile(`(?i)</` + thinkTagName + `\s*>`)
 
 // streamSafeSplit 返回可安全下发的稳定原文前缀与需继续缓冲的尾部。
 func streamSafeSplit(s string) (safe, hold string) {
@@ -228,7 +239,12 @@ func trailingMarkerPrefix(s string) int {
 		return -1
 	}
 	tail := strings.ToLower(s[i:])
-	for _, marker := range []string{"<think", "</think>", "<]minimax[>["} {
+	// 长的写在前：<thinking / </thinking> 必须先于 <think 命中，
+	// 否则 "<thinki" 这类被切开的 <thinking> 前缀不会被缓冲而泄漏成正文。
+	// 闭标签 marker 必须带尾 ">"（</thinking>）：严格 len<len 判断下，恰好切成
+	// "</thinking"（缺 >）时 tail 与 "</thinking" 等长不命中而泄漏，故以 "</thinking>" 为准，
+	// 使其作为严格前缀被缓冲；完整的 "</thinking>" 等长不命中，正常交给 sanitize 剥除。
+	for _, marker := range []string{"<thinking", "</thinking>", "<think", "<]minimax[>["} {
 		if len(tail) < len(marker) && strings.HasPrefix(marker, tail) {
 			return i
 		}
