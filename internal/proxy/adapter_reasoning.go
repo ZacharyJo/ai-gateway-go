@@ -12,8 +12,8 @@ import "strings"
 // 绝不混进 output_text 正文，正文永远干净。这修复了「content 空时拿 reasoning_content
 // 当正文输出，导致 <think>/<review> 标签进正文」的问题。
 
-const thinkOpenTag = "<think>"
-const thinkCloseTag = "</think>"
+// think 标签的字面量常量已移除：标签可能带 ing 后缀与属性/空白，一律走 adapter.go 的
+// thinkTagName / thinkOpenTagPattern / thinkCloseScan 统一口径，避免各处实现再次漂移。
 
 // extractReasoningText 从一个 message/delta 对象里穷举 reasoning 字段。
 // 优先级：reasoning_content(字符串) > reasoning(字符串) > reasoning.{content,text,summary}。
@@ -91,18 +91,17 @@ func cleanReasoningText(s string) string {
 func splitLeadingThinkBlock(text string) (reasoning, answer string, ok bool) {
 	leadingWS := len(text) - len(strings.TrimLeft(text, " \t\r\n"))
 	afterWS := text[leadingWS:]
-	if !strings.HasPrefix(afterWS, thinkOpenTag) {
+	open := thinkOpenTagPattern.FindStringIndex(afterWS)
+	if open == nil {
 		return "", "", false
 	}
-	bodyStart := leadingWS + len(thinkOpenTag)
-	rel := strings.Index(text[bodyStart:], thinkCloseTag)
-	if rel < 0 {
+	bodyStart := leadingWS + open[1]
+	closing := thinkCloseScan.FindStringIndex(text[bodyStart:])
+	if closing == nil {
 		return "", "", false
 	}
-	closeStart := bodyStart + rel
-	answerStart := closeStart + len(thinkCloseTag)
-	reasoning = strings.TrimSpace(text[bodyStart:closeStart])
-	answer = strings.TrimLeft(text[answerStart:], " \t\r\n")
+	reasoning = strings.TrimSpace(text[bodyStart : bodyStart+closing[0]])
+	answer = strings.TrimLeft(text[bodyStart+closing[1]:], " \t\r\n")
 	return reasoning, answer, true
 }
 
@@ -110,10 +109,11 @@ func splitLeadingThinkBlock(text string) (reasoning, answer string, ok bool) {
 // 命中返回 (去标签后文本, true)，未命中返回 ("", false)。
 func stripLeadingThinkOpenTag(text string) (string, bool) {
 	trimmed := strings.TrimLeft(text, " \t\r\n")
-	if rest, ok := strings.CutPrefix(trimmed, thinkOpenTag); ok {
-		return strings.TrimLeft(rest, " \t\r\n"), true
+	open := thinkOpenTagPattern.FindStringIndex(trimmed)
+	if open == nil {
+		return "", false
 	}
-	return "", false
+	return strings.TrimLeft(trimmed[open[1]:], " \t\r\n"), true
 }
 
 // thinkPrefixDecision 是流式 <think> 前导探测的三态判定。
@@ -134,18 +134,39 @@ const (
 	inlineThinkText                             // 已确认是正文：直接透传
 )
 
-// leadingThinkPrefixDecision 判断已缓冲的正文前缀是否为 <think> 开头。
+// leadingThinkPrefixDecision 判断已缓冲的正文前缀是否为 think 开标签开头。
 // 由于标签可能被切在多个 chunk，需要在字节不足时返回 NeedMore 继续缓冲。
 func leadingThinkPrefixDecision(buffer string) thinkPrefixDecision {
 	trimmed := strings.TrimLeft(buffer, " \t\r\n")
 	if trimmed == "" {
 		return thinkNeedMore
 	}
-	if strings.HasPrefix(trimmed, thinkOpenTag) {
+	if thinkOpenTagPattern.MatchString(trimmed) {
 		return thinkReasoning
 	}
-	if strings.HasPrefix(thinkOpenTag, trimmed) {
-		return thinkNeedMore // trimmed 是 "<think>" 的前缀，可能还没到齐
+	if isThinkOpenPartial(trimmed) {
+		return thinkNeedMore // 是某个开标签的前缀（如 "<thi" / "<thinking "），可能还没到齐
 	}
 	return thinkText
+}
+
+// isThinkOpenPartial 判断 s（已去前导空白）是否为"尚未写完的 think 开标签"前缀。
+// 流式下标签可能被切在多个 chunk（"<thi" + "nking>"），这类尾部必须继续缓冲，
+// 否则半个标签会被当正文下发。标签名为 think/thinking 的任意前缀即算命中；
+// 出现 '>' 说明标签已完整，交由 thinkOpenTagPattern 判定。
+func isThinkOpenPartial(s string) bool {
+	if !strings.HasPrefix(s, "<") || strings.ContainsRune(s, '>') {
+		return false
+	}
+	name := strings.ToLower(s[1:])
+	if i := strings.IndexAny(name, " \t\r\n"); i >= 0 {
+		name = name[:i]
+	}
+	// 空白紧跟 "<" 时 name 被剥空，这类输入永远长不成标签，直接按正文放行；
+	// 只有单独的 "<" 才可能继续长成 <thinking，需要继续缓冲。
+	if name == "" {
+		return s == "<"
+	}
+	return len(name) <= len("thinking") &&
+		(strings.HasPrefix("think", name) || strings.HasPrefix("thinking", name))
 }

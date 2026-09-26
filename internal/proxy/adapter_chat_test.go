@@ -111,6 +111,56 @@ func TestChatSSETransformerNoOrphanDoneForIncompleteTool(t *testing.T) {
 	}
 }
 
+// TestChatSSETransformerInlineThinkVariants 验证 think 标签变体在流式路径下也能
+// 归入 reasoning、正文保持干净——含标签被切在多个 chunk 的情形。
+// 回归：此前只认字面量 <think>/</think>，<thinking> 与带空白的标签整块穿透进 output_text，
+// codex 会把它们当普通文本渲染出来。
+func TestChatSSETransformerInlineThinkVariants(t *testing.T) {
+	cases := []struct {
+		name   string
+		chunks []string
+		wantR  string
+		wantT  string
+	}{
+		{"thinking split across chunks", []string{"<thi", "nking>思考", "中</thin", "king>正文"}, "思考中", "正文"},
+		{"thinking single chunk", []string{"<thinking>思考</thinking>正文"}, "思考", "正文"},
+		{"open tag with space", []string{"<think >思考</think >正文"}, "思考", "正文"},
+		{"bare think unchanged", []string{"<think>思考</think>正文"}, "思考", "正文"},
+		// "<" 后跟空白永远长不成标签，必须当正文立即下发，不能攒到 flush 才吐。
+		{"lt space is plain text", []string{"< 5", ">3"}, "", "< 5>3"},
+		// 单独的 "<" 仍要缓冲：下一 chunk 才到齐 "<thinking>"，思考仍归 reasoning。
+		{"bare lt then thinking split", []string{"<", "thinking>思考", "</thinking>正文"}, "思考", "正文"},
+		{"plain text unaffected", []string{"hello"}, "", "hello"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+			var sse strings.Builder
+			for _, d := range c.chunks {
+				payload, err := json.Marshal(map[string]any{
+					"id": "c",
+					"choices": []any{map[string]any{
+						"index": 0, "delta": map[string]any{"content": d}, "finish_reason": nil,
+					}},
+				})
+				if err != nil {
+					t.Fatalf("marshal chunk: %v", err)
+				}
+				// 内容在 Push 时就逐帧下发，只收 Flush 会漏掉全部 delta。
+				sse.WriteString(tr.Push(string(payload)))
+			}
+			sse.WriteString(tr.Flush())
+			out := sse.String()
+			if got := collectDeltaText(out, "response.reasoning_summary_text.delta"); got != c.wantR {
+				t.Errorf("reasoning = %q, want %q\n%s", got, c.wantR, out)
+			}
+			if got := collectDeltaText(out, "response.output_text.delta"); got != c.wantT {
+				t.Errorf("text = %q, want %q\n%s", got, c.wantT, out)
+			}
+		})
+	}
+}
+
 // TestApplyChatToolChoiceEnums 验证 Chat 适配的 tool_choice 与 Messages 版对齐：
 // map 形式的 none/auto/required 枚举都被处理（此前只认命名工具）。
 func TestApplyChatToolChoiceEnums(t *testing.T) {

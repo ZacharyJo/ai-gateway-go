@@ -44,6 +44,9 @@ func TestSplitLeadingThinkBlock(t *testing.T) {
 		{"no open tag", "just text", "", "", false},
 		{"open no close", "<think>unterminated", "", "", false},
 		{"empty think", "<think></think>answer", "", "answer", true},
+		{"thinking variant", "<thinking>思考</thinking>正文", "思考", "正文", true},
+		{"open tag with space", "<think >思考</think >正文", "思考", "正文", true},
+		{"thinking leading ws", "\n <thinking>abc</thinking>hi", "abc", "hi", true},
 	}
 	for _, c := range cases {
 		r, a, ok := splitLeadingThinkBlock(c.in)
