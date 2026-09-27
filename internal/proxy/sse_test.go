@@ -239,6 +239,81 @@ func TestStreamSSEAdaptedTruncatedStreamGetsDone(t *testing.T) {
 	}
 }
 
+// 上游已产出正文、但流在 message_stop 之前结束（mock 写完直接 return 也是这种：
+// HTTP 响应正常终止 → 客户端读到干净 EOF）。必须补终态帧并上报截断，不能留断尾流。
+const truncatedMessagesSSE = `data: {"type":"message_start","message":{"id":"m1","model":"m"}}` + "\n\n" +
+	`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+	`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}` + "\n\n"
+
+func TestStreamSSEAdaptedNoMessageStopEmitsIncomplete(t *testing.T) {
+	rr := httptest.NewRecorder()
+	tr := newMessagesSSETransformer("m", nil)
+	_, truncated := streamSSEAdapted(rr, &truncatedReader{data: []byte(truncatedMessagesSSE), err: io.EOF}, tr)
+	out := rr.Body.String()
+	if !truncated {
+		t.Error("无 message_stop 的流应上报 truncated=true（干净 EOF 也一样）")
+	}
+	if !strings.Contains(out, "response.incomplete") {
+		t.Errorf("应补 response.incomplete:\n%s", out)
+	}
+	if strings.Contains(out, "response.completed") {
+		t.Errorf("不得谎报 completed:\n%s", out)
+	}
+	if !strings.HasSuffix(out, "data: [DONE]\n\n") {
+		t.Errorf("应以 [DONE] 收尾:\n%s", out)
+	}
+}
+
+// 负向对照：正常发到 message_stop 的流不得被误报截断。
+func TestStreamSSEAdaptedCompleteRoundNotTruncated(t *testing.T) {
+	sse := truncatedMessagesSSE +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+	rr := httptest.NewRecorder()
+	tr := newMessagesSSETransformer("m", nil)
+	_, truncated := streamSSEAdapted(rr, &truncatedReader{data: []byte(sse), err: io.EOF}, tr)
+	out := rr.Body.String()
+	if truncated {
+		t.Error("正常收尾的流不该上报截断")
+	}
+	if !strings.Contains(out, "response.completed") {
+		t.Errorf("应发 response.completed:\n%s", out)
+	}
+	if strings.Contains(out, "response.incomplete") || strings.Contains(out, "response.failed") {
+		t.Errorf("正常收尾不得出现 incomplete/failed:\n%s", out)
+	}
+}
+
+// 干净 EOF 但上游没发 finish_reason：同样是截断（Chat 路径）。
+func TestStreamSSEChatCleanEOFWithoutFinishIsTruncated(t *testing.T) {
+	chunk := `data: {"id":"c","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}` + "\n\n"
+	rr := httptest.NewRecorder()
+	tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+	_, truncated := streamSSEChat(rr, &truncatedReader{data: []byte(chunk), err: io.EOF}, tr)
+	out := rr.Body.String()
+	if !truncated {
+		t.Error("无 finish_reason 的干净 EOF 应上报 truncated=true")
+	}
+	if !strings.Contains(out, "response.incomplete") {
+		t.Errorf("应补 response.incomplete:\n%s", out)
+	}
+}
+
+// 负向对照：正常收到 finish_reason 的 Chat 轮次不得被误报截断。
+func TestStreamSSEChatCompleteRoundNotTruncated(t *testing.T) {
+	chunk := `data: {"id":"c","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}` + "\n\n"
+	rr := httptest.NewRecorder()
+	tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+	_, truncated := streamSSEChat(rr, &truncatedReader{data: []byte(chunk), err: io.EOF}, tr)
+	out := rr.Body.String()
+	if truncated {
+		t.Error("收到 finish_reason 的轮次不该上报截断")
+	}
+	if !strings.Contains(out, "response.completed") {
+		t.Errorf("应发 response.completed:\n%s", out)
+	}
+}
+
 func TestIsCleanStreamEnd(t *testing.T) {
 	if !isCleanStreamEnd(io.EOF) {
 		t.Error("io.EOF 应视为干净结束")
