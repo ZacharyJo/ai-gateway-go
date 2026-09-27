@@ -897,6 +897,11 @@ type ChatSSETransformer struct {
 	// 否则 response.completed 永远缺 usage。
 	finishPending bool
 	finishModel   string // 挂起中的 model
+	// 流内错误帧（event:error / data 带 error）已转成失败终态。
+	failed bool
+	// 上游声明了工具调用但最终没留下任何可执行调用（缺 name / 空白 name）。
+	// 对齐 cc-switch：这种“答一句就停、零报错”的空工具回合应报 failed 而非 completed。
+	droppedToolCalls int
 }
 
 type chatToolCallState struct {
@@ -906,6 +911,7 @@ type chatToolCallState struct {
 	index   int // Responses output_index
 	custom  bool
 	started bool
+	dropped bool
 }
 
 // newChatSSETransformer 构造转换器。
@@ -929,6 +935,10 @@ func (t *ChatSSETransformer) Push(data string) string {
 	var parsed map[string]any
 	if err := json.Unmarshal([]byte(data), &parsed); err != nil {
 		return ""
+	}
+	// 流内错误帧：立即转成 response.failed，不再继续输出（对齐 cc-switch）。
+	if _, has := parsed["error"]; has {
+		return t.emitFailed(parsed)
 	}
 	// usage 可能单独成帧（include_usage 的最后一个 chunk），也可能与 finish_reason 同帧，
 	// 统一先累计，finish 时才能带上。
@@ -1015,7 +1025,7 @@ func (t *ChatSSETransformer) processDelta(delta map[string]any, model string) st
 				}
 				st.args += stringifyAny(fn["arguments"])
 			}
-			if !st.started && st.name != "" {
+			if !st.started && strings.TrimSpace(st.name) != "" {
 				st.started = true
 				itemID := st.id
 				if st.custom {
@@ -1240,6 +1250,17 @@ func (t *ChatSSETransformer) flushFinish(model string) string {
 	// 收尾前冲刷未决的内嵌 <think> 缓冲，并收尾 reasoning 项（若还开着）。
 	out += t.flushInlineThink()
 	out += t.finalizeReasoning()
+	// 上游声明了工具调用但最终没留下任何可执行调用（缺 name/纯空白），
+	// 且本回合也没有其它可执行输出：对齐 cc-switch，直接 failed，不再发 completed。
+	if t.droppedToolCalls > 0 && !t.hasEmittedToolCall() && !t.hasSubstantiveOutput() {
+		t.done = true
+		return out + t.emitFailed(map[string]any{
+			"error": map[string]any{
+				"message": "upstream returned tool call(s) without a usable function name",
+				"type":    "upstream_tool_call_dropped",
+			},
+		})
+	}
 	// 收尾各 tool call
 	// 按 output_index 升序收尾：map 迭代顺序随机，直接 range 会让并行工具的
 	// output_item.done 帧乱序（Codex 侧按顺序拼接，乱序会错配 call）。
@@ -1252,6 +1273,12 @@ func (t *ChatSSETransformer) flushFinish(model string) string {
 		// 只有 index/name/id 分片、从未触发过 .added 的 tool call 不发收尾帧：
 		// 否则给客户端一个没有 output_item.added 配对的孤儿 .done（上游流中途断掉时）。
 		if !st.started {
+			// 上游声明了工具调用但最终没有合法 name（空/纯空白）：标记为被丢弃，
+			// 本回合若没有任何可执行输出，最终应报 failed 而非 completed。
+			if !st.dropped && strings.TrimSpace(st.name) == "" {
+				st.dropped = true
+				t.droppedToolCalls++
+			}
 			continue
 		}
 		// 流式累积的 args 是分片拼接的 JSON，收尾时归一 exec_command 参数
@@ -1310,6 +1337,17 @@ func (t *ChatSSETransformer) flushFinish(model string) string {
 
 // emitCompleted 补发被挂起的 response.completed + [DONE]（finish 之后等 usage chunk 或 Flush）。
 func (t *ChatSSETransformer) emitCompleted() string {
+	// 上游声明了工具调用但最终没留下任何可执行调用（缺 name/纯空白），
+	// 对齐 cc-switch：即使带正文，只要本回合本应继续工具链却只剩空工具调用，
+	// 就报 failed 而非 completed，避免“答一句就停、零报错”的静默收尾。
+	if t.droppedToolCalls > 0 && !t.hasEmittedToolCall() {
+		return t.emitFailed(map[string]any{
+			"error": map[string]any{
+				"message": "upstream returned tool call(s) without a usable function name",
+				"type":    "upstream_tool_call_dropped",
+			},
+		})
+	}
 	t.done = true
 	t.finishPending = false
 	resp := map[string]any{
@@ -1326,6 +1364,47 @@ func (t *ChatSSETransformer) emitCompleted() string {
 	return sseFrame("response.completed", map[string]any{
 		"type": "response.completed", "response": resp,
 	}) + "data: [DONE]\n\n"
+}
+
+// emitFailed 输出 response.failed + [DONE] 终态，并让后续帧全部失效。
+func (t *ChatSSETransformer) emitFailed(parsed map[string]any) string {
+	if t.done {
+		return ""
+	}
+	t.done = true
+	t.finishPending = false
+	errPayload := parsed["error"]
+	if errPayload == nil {
+		errPayload = map[string]any{"message": "upstream stream error", "type": "stream_error"}
+	}
+	resp := map[string]any{
+		"id": t.responseID, "object": "response",
+		"created_at": t.createdAt, "model": t.model, "status": "failed", "error": errPayload,
+	}
+	if t.usageTokens != nil {
+		in := t.usageTokens["input_tokens"]
+		outN := t.usageTokens["output_tokens"]
+		resp["usage"] = map[string]any{"input_tokens": in, "output_tokens": outN, "total_tokens": in + outN}
+	}
+	return sseFrame("response.failed", map[string]any{
+		"type": "response.failed", "response": resp,
+	}) + "data: [DONE]\n\n"
+}
+
+// hasEmittedToolCall 判断本回合是否已经下发过可执行工具调用项。
+func (t *ChatSSETransformer) hasEmittedToolCall() bool {
+	for _, st := range t.toolCalls {
+		if st.started && !st.dropped {
+			return true
+		}
+	}
+	return false
+}
+
+// hasSubstantiveOutput 判断本回合是否已有可执行输出（正文、reasoning、合法工具调用）。
+// 用于无 finish_reason 断流时区分“有产出可保留”和“完全空流直接 failed”。
+func (t *ChatSSETransformer) hasSubstantiveOutput() bool {
+	return t.textStarted || t.reasoningStarted || t.hasEmittedToolCall()
 }
 
 func (t *ChatSSETransformer) flushUsage(parsed map[string]any) {
@@ -1350,15 +1429,37 @@ func (t *ChatSSETransformer) Flush() string {
 	}
 	if t.finishPending {
 		// 流已干净结束但没等到 usage chunk（上游未开 include_usage）：补发挂起的 completed
+		// （若工具调用被丢弃且无可执行输出，emitCompleted 会转成 failed）。
 		return t.emitCompleted()
 	}
 	// 无 finish_reason 直接结束：冲刷未决的内嵌 <think> 与 reasoning，再收尾。
 	out := t.flushInlineThink()
 	out += t.finalizeReasoning()
+	// 对齐 cc-switch：流在无 finish_reason 前结束，但有可执行输出/已丢弃工具调用时，
+	// 不再谎报 completed。完全空流则直接 failed；有产出则保留输出并按失败/完成处理。
+	if t.droppedToolCalls > 0 && !t.hasEmittedToolCall() {
+		return out + t.emitFailed(map[string]any{
+			"error": map[string]any{
+				"message": "upstream stream ended before finish_reason with only dropped tool calls",
+				"type":    "upstream_tool_call_dropped",
+			},
+		})
+	}
+	if !t.hasSubstantiveOutput() {
+		return t.emitFailed(map[string]any{
+			"error": map[string]any{
+				"message": "upstream stream ended before sending finish_reason",
+				"type":    "stream_truncated",
+			},
+		})
+	}
+	// 有产出但没等到 finish_reason：按截断收尾，而不是谎报 completed。
+	// 对齐 cc-switch：合成 finish_reason=length，终态用 response.incomplete。
 	t.done = true
 	resp := map[string]any{
 		"id": t.responseID, "object": "response",
-		"created_at": t.createdAt, "model": t.model, "status": "completed",
+		"created_at": t.createdAt, "model": t.model, "status": "incomplete",
+		"incomplete_details": map[string]any{"reason": "max_output_tokens"},
 	}
 	// 与 emitCompleted 一致：上游给了 usage 就带上（否则该分支把 usage 丢掉，计量漏计）。
 	if t.usageTokens != nil {
@@ -1366,8 +1467,8 @@ func (t *ChatSSETransformer) Flush() string {
 		outN := t.usageTokens["output_tokens"]
 		resp["usage"] = map[string]any{"input_tokens": in, "output_tokens": outN, "total_tokens": in + outN}
 	}
-	return out + sseFrame("response.completed", map[string]any{
-		"type": "response.completed", "response": resp,
+	return out + sseFrame("response.incomplete", map[string]any{
+		"type": "response.incomplete", "response": resp,
 	}) + "data: [DONE]\n\n"
 }
 

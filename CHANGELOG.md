@@ -2,6 +2,18 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)；main 合入使用 squash，每个 PR 对应一条记录。
 
+## [v0.2.4] - 2026-09-27
+
+### Fixed
+
+- **空工具调用不再静默收尾**：上游声明了工具调用但 `name` 缺失或为纯空白（分片只给了 index / id）时，不再静默丢弃后照常收尾——本回合若没有任何可执行工具调用，Chat 与 Messages 两条适配路径都改为下发 `response.failed`（`upstream_tool_call_dropped`）。修复前 codex 会看到"答一句就停、零报错"的 `response.completed`，误判任务已结束。
+- **流内错误帧立即转失败终态**：适配路径流中 data 带 `error` 的帧不再被吞掉，直接转 `response.failed + [DONE]`，后续帧全部失效。
+- **无 finish_reason 断流不再谎报 completed**：流在 `finish_reason` 之前结束（连接 RST / 网关断流 / 空闲超时）时，已有可执行输出（正文 / reasoning / 合法工具调用）的改用 `response.incomplete`（`incomplete_details.reason=max_output_tokens`）收尾，完全空流转 `response.failed`（`stream_truncated`）；两条分支都保留上游 usage 计量。
+
+### Changed
+
+- **SSE 首包预检与自动重打**：适配路径的 200 SSE 在交付前先读首个完整事件——上游 200 后迟迟不吐数据、流在首个完整事件前就干净结束、或首帧即失败终态时，丢弃该次尝试自动重打一次（上限 1 次）；读到有效首帧即开始透传，已读字节经 `MultiReader` 接回原流，不做整体回退。预检读取上限 256KB，超限 fail-open 交回正常交付，避免阻塞超大首帧。
+
 ## [v0.2.3] - 2026-09-27
 
 ### Fixed
