@@ -2,6 +2,17 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)；main 合入使用 squash，每个 PR 对应一条记录。
 
+## [v0.2.5] - 2026-09-27
+
+### Fixed
+
+- **Messages 路径不再留断尾流**：上游 Messages 流在 `message_stop` 之前结束（连接被掐断，或网关 / mock 写完直接 return）时，此前只补 `[DONE]`、从不合成终态帧——客户端拿到的是一条没有终态帧的流，轮次永远挂起。现在与 Chat 路径同口径收尾：有产出按截断报 `response.incomplete`，完全空流报 `stream_truncated`，工具调用被丢弃且无可执行调用时报 `upstream_tool_call_dropped`。
+- **截断判定从 TCP 层扩到协议层**：干净 EOF 只说明 HTTP 响应正常终止，不代表这一轮正常收尾。适配路径现在只要没收到上游终止事件（Messages 的 `message_stop` / Chat 的 `finish_reason`），就按截断上报、`request_finish` 记 503，不再把不完整轮次误记成 200 成功。裸 `[DONE]` 流仍按原样透传。
+
+### Changed
+
+- **CI 强制 staticcheck 与竞态检测**：在 `go vet` + `go test` 之外新增 `staticcheck`（版本钉死 v0.8.1）与 `go test -race`，与 PR 模板的要求一致。
+
 ## [v0.2.4] - 2026-09-27
 
 ### Fixed
