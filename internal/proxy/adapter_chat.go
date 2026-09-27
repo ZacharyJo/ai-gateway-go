@@ -897,6 +897,9 @@ type ChatSSETransformer struct {
 	// 否则 response.completed 永远缺 usage。
 	finishPending bool
 	finishModel   string // 挂起中的 model
+	// sawFinishReason：上游发过 finish_reason（协议正常终止事件）。流提前结束时靠它
+	// 区分"上游正常收尾"与"上游根本没走到终止事件"，据此上报截断。
+	sawFinishReason bool
 	// 上游声明了工具调用但最终没留下任何可执行调用（缺 name / 空白 name）。
 	// 对齐 cc-switch：这种“答一句就停、零报错”的空工具回合应报 failed 而非 completed。
 	droppedToolCalls int
@@ -1244,6 +1247,7 @@ func (t *ChatSSETransformer) pushTextDelta(delta string) string {
 }
 
 func (t *ChatSSETransformer) flushFinish(model string) string {
+	t.sawFinishReason = true // 上游正常终止事件：Flush 不再按截断上报
 	var out string
 	// 收尾前冲刷未决的内嵌 <think> 缓冲，并收尾 reasoning 项（若还开着）。
 	out += t.flushInlineThink()
@@ -1404,6 +1408,11 @@ func (t *ChatSSETransformer) hasEmittedToolCall() bool {
 func (t *ChatSSETransformer) hasSubstantiveOutput() bool {
 	return t.textStarted || t.reasoningStarted || t.hasEmittedToolCall()
 }
+
+// ProtocolIncomplete 报告上游是否缺了协议终止事件（finish_reason）。
+// 适配路径据此把截断判定从 TCP 层（读错误）扩展到协议层：干净 EOF 但上游没正常收尾，
+// 客户端拿到的仍是不完整轮次，监控不应记成功。
+func (t *ChatSSETransformer) ProtocolIncomplete() bool { return !t.sawFinishReason }
 
 func (t *ChatSSETransformer) flushUsage(parsed map[string]any) {
 	if usage, ok := parsed["usage"].(map[string]any); ok {

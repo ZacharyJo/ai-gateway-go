@@ -81,6 +81,12 @@ type messagesSSEState struct {
 	toolUseByIndex      map[int]*toolUseState
 	customTools         map[string]bool
 	done                bool // 已发出终态（failed 或 completed），后续帧全部丢弃
+	// sawMessageStop：上游发过 message_stop（协议正常终止事件）。流提前结束（截断）时
+	// 靠它区分"上游正常收尾"与"上游根本没走到终止事件"，据此补终态帧并上报截断。
+	sawMessageStop bool
+	// sawEvent：上游发过至少一个 Messages 协议事件。只有这种情况才在流提前结束时补终态帧——
+	// 裸 [DONE] 流按原样透传（客户端读到 [DONE] 即停读，其后补帧没有意义）。
+	sawEvent bool
 	// 上游声明了 tool_use 但最终没有合法 name（空/纯空白）：对齐 cc-switch，
 	// 本回合若没有任何可执行输出，最终应报 failed 而非 completed。
 	droppedToolCalls int
@@ -191,14 +197,77 @@ func (t *MessagesSSETransformer) Push(chunk string) string {
 	return convertMessagesSSE(complete, t.state)
 }
 
-// Flush 收尾：处理残留 pending。
+// Flush 收尾：处理残留 pending，并在上游没发 message_stop（流被截断/提前结束）时补终态帧。
+// 缺终态帧的话客户端拿到的是断尾流——轮次永远挂起，且监控会按干净 200 成功记账。
+// 口径与 Chat 路径（ChatSSETransformer.Flush）一致。
 func (t *MessagesSSETransformer) Flush() string {
-	if t.pending == "" {
+	var out string
+	if t.pending != "" {
+		out = convertMessagesSSE(t.pending+"\n\n", t.state)
+		t.pending = ""
+	}
+	return out + t.state.synthesizeTerminal()
+}
+
+// ProtocolIncomplete 报告上游是否缺了协议终止事件（message_stop）。
+// 适配路径据此把截断判定从 TCP 层（读错误）扩展到协议层：干净 EOF 但上游没正常收尾，
+// 客户端拿到的仍是不完整轮次，监控不应记成功。
+func (t *MessagesSSETransformer) ProtocolIncomplete() bool { return !t.state.sawMessageStop }
+
+// hasSubstantiveOutput 判断本回合是否已有可执行输出（正文或合法工具调用）。
+// 用于流提前结束时区分"有产出可保留"与"完全空流直接 failed"。
+func (st *messagesSSEState) hasSubstantiveOutput() bool {
+	if st.hasEmittedToolCall() {
+		return true
+	}
+	for _, text := range st.contentTextByIndex {
+		if strings.TrimSpace(text) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// synthesizeTerminal 在流结束时补终态帧：上游发过协议事件、但没发 message_stop、且尚未发过终态。
+// 口径与 Chat 路径一致——工具调用被丢弃且无可执行调用时报 upstream_tool_call_dropped；
+// 完全空流报 stream_truncated；有产出则按截断收尾（response.incomplete），不谎报 completed。
+// 上游正常收尾、已发过终态、或全程只有裸 [DONE] 时返回空串（幂等）。
+func (st *messagesSSEState) synthesizeTerminal() string {
+	if st.done || st.sawMessageStop || !st.sawEvent {
 		return ""
 	}
-	out := convertMessagesSSE(t.pending+"\n\n", t.state)
-	t.pending = ""
-	return out
+	st.done = true
+	failed := func(message, kind string) string {
+		return sseFrame("response.failed", map[string]any{
+			"type": "response.failed",
+			"response": map[string]any{
+				"id": st.responseID, "object": "response", "status": "failed",
+				"created_at": st.createdAt,
+				"error":      map[string]any{"message": message, "type": kind},
+			},
+		}) + "data: [DONE]\n\n"
+	}
+	if st.droppedToolCalls > 0 && !st.hasEmittedToolCall() {
+		return failed("upstream returned tool use(s) without a usable name", "upstream_tool_call_dropped")
+	}
+	if !st.hasSubstantiveOutput() {
+		return failed("upstream stream ended before sending message_stop", "stream_truncated")
+	}
+	// 有产出但没等到 message_stop：按截断收尾，而不是谎报 completed。
+	response := map[string]any{
+		"id": st.responseID, "object": "response", "status": "incomplete",
+		"model": st.model, "created_at": st.createdAt,
+		"incomplete_details": map[string]any{"reason": "max_output_tokens"},
+	}
+	if st.inputTokens > 0 || st.outputTokens > 0 {
+		response["usage"] = map[string]any{
+			"input_tokens": st.inputTokens, "output_tokens": st.outputTokens,
+			"total_tokens": st.inputTokens + st.outputTokens,
+		}
+	}
+	return sseFrame("response.incomplete", map[string]any{
+		"type": "response.incomplete", "response": response,
+	}) + "data: [DONE]\n\n"
 }
 
 // Usage 返回累积的 input/output token 数（计量用；Flush 后读取）。
@@ -235,6 +304,9 @@ func convertMessagesSSE(text string, st *messagesSSEState) string {
 		eventType := stringifyAny(parsed["type"])
 		if eventType == "" {
 			eventType = frame.event
+		}
+		if eventType != "" {
+			st.sawEvent = true
 		}
 		switch {
 		case eventType == "message_start":
@@ -435,6 +507,7 @@ func convertMessagesSSE(text string, st *messagesSSEState) string {
 			st.done = true // 终态：后续 message_stop 不能再翻成 completed
 
 		case eventType == "message_stop":
+			st.sawMessageStop = true // 上游正常终止事件：Flush 不再补截断终态
 			content := []any{}
 			for _, idx := range sortedContentIndexes(st.contentTextByIndex) {
 				content = append(content, map[string]any{

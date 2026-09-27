@@ -89,6 +89,22 @@ type sseEventTransformer interface {
 	Flush() string
 }
 
+// protocolIncompleteReporter 由能判断"上游是否缺了协议终止事件"的转换器实现
+// （Chat 看 finish_reason，Messages 看 message_stop）。适配路径据此把截断判定从 TCP 层
+// （读错误）扩展到协议层：干净 EOF 但上游没正常收尾时，客户端拿到的仍是不完整轮次，
+// 监控不该记成功。未实现该接口的转换器按"无法判定"处理，不额外上报截断。
+type protocolIncompleteReporter interface {
+	ProtocolIncomplete() bool
+}
+
+// protocolIncomplete 在转换器能判定时返回"上游是否缺了协议终止事件"，否则 false。
+func protocolIncomplete(t sseEventTransformer) bool {
+	if r, ok := t.(protocolIncompleteReporter); ok {
+		return r.ProtocolIncomplete()
+	}
+	return false
+}
+
 // chainedSSETransformer 顺序组合两个变换器：第二个消费第一个的输出。
 // 适配路径开 bridge 桥接时用：MessagesSSETransformer 先转 Responses，再喂给
 // imageBridgeSSETransformer 执行 bridge_imagegen。
@@ -107,6 +123,9 @@ func (c *chainedSSETransformer) Flush() string {
 	out.WriteString(c.second.Flush())
 	return out.String()
 }
+
+// ProtocolIncomplete 委托链首（Messages 转换器）：链尾的图片桥接不关心协议终止事件。
+func (c *chainedSSETransformer) ProtocolIncomplete() bool { return protocolIncomplete(c.first) }
 
 // streamSSEUsage 把上游 SSE 逐块写回客户端并刷新（保证首字低延迟），同时嗅探
 // GPT 透传流里的 usage（response.completed 帧）。
@@ -242,7 +261,9 @@ func streamSSEAdapted(w http.ResponseWriter, body io.Reader, t sseEventTransform
 		write("data: [DONE]\n\n")
 		return "", true
 	}
-	return "", !isCleanStreamEnd(readErr)
+	// 截断判定：TCP 层读错误（RST/空闲超时）之外，上游没发协议终止事件（message_stop）
+	// 同样算截断——干净 EOF 只是 HTTP 响应正常终止，不代表这一轮正常收尾。
+	return "", !isCleanStreamEnd(readErr) || protocolIncomplete(t)
 }
 
 // chatErrorFrame 从 Chat 错误 chunk 的 data 行里抽出 error 对象，包成 Responses 的
@@ -408,7 +429,9 @@ func streamSSEChatChained(w http.ResponseWriter, body io.Reader, t *ChatSSETrans
 	} else {
 		write(t.Flush())
 	}
-	return "", !isCleanStreamEnd(readErr)
+	// 截断判定：TCP 层读错误之外，上游没发 finish_reason 同样算截断——干净 EOF 只是
+	// HTTP 响应正常终止，不代表这一轮正常收尾。
+	return "", !isCleanStreamEnd(readErr) || t.ProtocolIncomplete()
 }
 
 // keepaliveInterval 是长思考静默期的保活注释帧间隔：远小于常见流空闲超时（60s+），
