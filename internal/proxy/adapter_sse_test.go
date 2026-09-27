@@ -211,6 +211,49 @@ func TestMessagesSSENoMessageStopWithDroppedToolFails(t *testing.T) {
 	}
 }
 
+func TestMessagesSSEWhitespaceToolNameFailsRound(t *testing.T) {
+	// name 是纯空白：与缺失 name 同口径，不得当作可执行调用下发。
+	sse := strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"m1","model":"m"}}`, ``,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"   "}}`, ``,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}`, ``,
+		`data: {"type":"content_block_stop","index":0}`, ``,
+		`data: {"type":"message_stop"}`, ``,
+	}, "\n") + "\n"
+
+	out := pushAll(t, "m", sse)
+	if !strings.Contains(out, "response.failed") || !strings.Contains(out, "upstream_tool_call_dropped") {
+		t.Fatalf("whitespace tool name should fail:\n%s", out)
+	}
+	if strings.Contains(out, "response.completed") {
+		t.Fatalf("whitespace tool name must not complete:\n%s", out)
+	}
+}
+
+func TestMessagesSSEDroppedToolWithUsableCallCompletes(t *testing.T) {
+	// 同回合既有合法 tool_use 又有被丢弃的：只要下发过可执行调用就不该判失败。
+	sse := strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"m1","model":"m"}}`, ``,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_ok","name":"read_file"}}`, ``,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}`, ``,
+		`data: {"type":"content_block_stop","index":0}`, ``,
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_bad"}}`, ``,
+		`data: {"type":"content_block_stop","index":1}`, ``,
+		`data: {"type":"message_stop"}`, ``,
+	}, "\n") + "\n"
+
+	out := pushAll(t, "m", sse)
+	if strings.Contains(out, "response.failed") {
+		t.Fatalf("round with a usable tool use must not fail:\n%s", out)
+	}
+	if !strings.Contains(out, "response.completed") {
+		t.Fatalf("expected response.completed:\n%s", out)
+	}
+	if !strings.Contains(out, `"call_id":"toolu_ok"`) {
+		t.Errorf("usable tool use not emitted:\n%s", out)
+	}
+}
+
 func TestMessagesSSEMixedToolAndTextUsesDenseIndexes(t *testing.T) {
 	sse := strings.Join([]string{
 		`data: {"type":"message_start","message":{"id":"msg_1","model":"m"}}`, ``,

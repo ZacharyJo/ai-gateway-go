@@ -142,6 +142,39 @@ func TestChatSSETransformerDroppedToolKeepsOtherOutput(t *testing.T) {
 	}
 }
 
+func TestChatSSETransformerWhitespaceToolNameFailsRound(t *testing.T) {
+	// name 是纯空白：与缺失 name 同口径（TrimSpace 后为空），既不算已启动、
+	// 也不得下发给客户端，终态仍是 failed。
+	tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+	out := tr.Push(`{"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"   ","arguments":"{}"}}]},"finish_reason":"stop"}]}`) + tr.Flush()
+	if !strings.Contains(out, "response.failed") || !strings.Contains(out, "upstream_tool_call_dropped") {
+		t.Fatalf("whitespace tool name should fail:\n%s", out)
+	}
+	if strings.Contains(out, "response.completed") {
+		t.Fatalf("whitespace tool name must not complete:\n%s", out)
+	}
+	if strings.Contains(out, "function_call_arguments.done") || strings.Contains(out, `"name":"   "`) {
+		t.Errorf("whitespace-named tool item leaked:\n%s", out)
+	}
+}
+
+func TestChatSSETransformerDroppedToolWithUsableCallCompletes(t *testing.T) {
+	// 同回合既有合法调用又有被丢弃的调用：只要下发过可执行调用（hasEmittedToolCall
+	// 为真），就不该判失败——不能因为夹了一个空 name 就把整轮抹成 failed。
+	tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+	out := tr.Push(`{"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_ok","function":{"name":"bash","arguments":"{}"}},{"index":1,"id":"call_bad"}]},"finish_reason":"stop"}]}`)
+	out += tr.Flush()
+	if strings.Contains(out, "response.failed") {
+		t.Fatalf("round with a usable tool call must not fail:\n%s", out)
+	}
+	if !strings.Contains(out, "response.completed") {
+		t.Fatalf("expected response.completed:\n%s", out)
+	}
+	if !strings.Contains(out, `"call_id":"call_ok"`) {
+		t.Errorf("usable tool call not emitted:\n%s", out)
+	}
+}
+
 func TestChatSSETransformerStreamErrorFails(t *testing.T) {
 	tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
 	out := tr.Push(`data: {"error":{"message":"quota exceeded","type":"rate_limit_exceeded"}}`) + tr.Flush()
