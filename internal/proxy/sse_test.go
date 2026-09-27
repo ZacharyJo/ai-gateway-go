@@ -145,6 +145,49 @@ func TestStreamSSEZeroNilReadDoesNotSpin(t *testing.T) {
 	}
 }
 
+func TestPrimeSSEEvent(t *testing.T) {
+	// 完整首帧：返回 data、complete=true、已读字节。
+	reader := strings.NewReader("data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\"}}\n\ndata: next\n\n")
+	data, complete, buffered, err := primeSSEEvent(reader, 1024)
+	if err != nil || !complete {
+		t.Fatalf("primeSSEEvent = %q,%v,%v, want complete first frame", data, complete, err)
+	}
+	if !strings.Contains(data, "message_start") || !strings.Contains(string(buffered), "message_start") {
+		t.Errorf("first frame not captured: data=%q buffered=%q", data, buffered)
+	}
+
+	// 空流：返回 io.EOF（调用方据此重试）。
+	_, complete, buffered, err = primeSSEEvent(strings.NewReader(""), 1024)
+	if err == nil || !errors.Is(err, io.EOF) || complete {
+		t.Fatalf("empty stream: err=%v complete=%v, want EOF", err, complete)
+	}
+
+	// 非 EOF 断流且无任何数据：返回该错误。
+	_, complete, buffered, err = primeSSEEvent(&truncatedReader{err: errors.New("read tcp: reset")}, 1024)
+	if err == nil || complete {
+		t.Fatalf("truncated empty stream: err=%v complete=%v, want error", err, complete)
+	}
+
+	// 有部分数据但无完整事件，随后非 EOF：也视为首包前失败。
+	_, complete, buffered, err = primeSSEEvent(&truncatedReader{data: []byte("data: partial"), err: errors.New("read tcp: reset")}, 1024)
+	if err == nil || complete {
+		t.Fatalf("partial truncated stream: err=%v complete=%v, want error", err, complete)
+	}
+	if len(buffered) == 0 {
+		t.Fatal("partial buffered bytes not returned")
+	}
+
+	// 超过 maxBytes 仍无完整事件：fail-open，返回已读字节和 nil。
+	big := strings.NewReader("data: " + strings.Repeat("x", 512))
+	_, complete, buffered, err = primeSSEEvent(big, 256)
+	if err != nil || complete {
+		t.Fatalf("oversized prime: err=%v complete=%v, want fail-open", err, complete)
+	}
+	if len(buffered) == 0 {
+		t.Fatal("oversized buffered bytes not returned")
+	}
+}
+
 func TestStreamSSETruncatedStreamGetsDone(t *testing.T) {
 	// 截断流兜底：读到一个字节都没吐、或吐了数据但没给 [DONE] 的截断流，都补 [DONE] 终止传输，
 	// 杜绝断尾流让客户端挂死。codex 按 response.completed 判定轮次完成，[DONE] 只终止传输、
@@ -235,7 +278,7 @@ func TestSSEDoneTrackerJsonTextWithDONEDoesNotSuppressFallback(t *testing.T) {
 }
 
 // TestStreamSSEChatTruncatedGetsTerminalFrame 验证截断流兜底：上游非 EOF 结束时，
-// 转换器被冲刷，codex 拿到 response.completed + [DONE] 的干净轮次终止，而不是断尾流。
+// 转换器被冲刷，codex 拿到 response.incomplete + [DONE] 的干净轮次终止，而不是断尾流。
 // 回归：此前截断不调 Flush、不发 [DONE]，codex 把没有终止帧的 200 流当"还没执行完"挂起。
 func TestStreamSSEChatTruncatedGetsTerminalFrame(t *testing.T) {
 	for _, tc := range []struct {
@@ -257,8 +300,8 @@ func TestStreamSSEChatTruncatedGetsTerminalFrame(t *testing.T) {
 				t.Error("截断应上报 truncated=true")
 			}
 			out := rr.Body.String()
-			if !strings.Contains(out, "response.completed") {
-				t.Errorf("截断流应补发 response.completed:\n%s", out)
+			if !strings.Contains(out, "response.incomplete") {
+				t.Errorf("截断流应补发 response.incomplete:\n%s", out)
 			}
 			if !strings.HasSuffix(out, "data: [DONE]\n\n") {
 				t.Errorf("截断流应以 [DONE] 收尾:\n%s", out)
@@ -284,8 +327,8 @@ func TestStreamSSEChatTruncatedMidThinkEmitsFallbackText(t *testing.T) {
 	if got := collectDeltaText(out, "response.output_text.delta"); got != "思考到一半被掐断" {
 		t.Errorf("未闭合 think 应兜底成正文, got %q\n%s", got, out)
 	}
-	if !strings.Contains(out, "response.completed") || !strings.HasSuffix(out, "data: [DONE]\n\n") {
-		t.Errorf("截断流应补 response.completed + [DONE]:\n%s", out)
+	if !strings.Contains(out, "response.incomplete") || !strings.HasSuffix(out, "data: [DONE]\n\n") {
+		t.Errorf("截断流应补 response.incomplete + [DONE]:\n%s", out)
 	}
 }
 
@@ -328,7 +371,7 @@ func TestStreamSSEChatKeepaliveDuringThink(t *testing.T) {
 	if !strings.Contains(out, keepaliveFrame) {
 		t.Errorf("思考缓冲期应发保活注释帧:\n%q", out)
 	}
-	if !strings.Contains(out, "response.completed") {
-		t.Errorf("流应正常收尾:\n%s", out)
+	if !strings.Contains(out, "response.incomplete") {
+		t.Errorf("流应在无 finish_reason 时以 incomplete 收尾:\n%s", out)
 	}
 }

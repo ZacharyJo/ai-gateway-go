@@ -81,6 +81,9 @@ type messagesSSEState struct {
 	toolUseByIndex      map[int]*toolUseState
 	customTools         map[string]bool
 	done                bool // 已发出终态（failed 或 completed），后续帧全部丢弃
+	// 上游声明了 tool_use 但最终没有合法 name（空/纯空白）：对齐 cc-switch，
+	// 本回合若没有任何可执行输出，最终应报 failed 而非 completed。
+	droppedToolCalls int
 }
 
 // MessagesSSETransformer 是有状态的增量转换器。
@@ -150,6 +153,17 @@ func (st *messagesSSEState) mergeUsage(usage any) {
 	if v, ok := m["output_tokens"].(float64); ok && int(v) > st.outputTokens {
 		st.outputTokens = int(v)
 	}
+}
+
+// hasEmittedToolCall 判断本回合是否已经下发过可执行工具调用项。
+func (st *messagesSSEState) hasEmittedToolCall() bool {
+	for _, toolUse := range st.toolUseByIndex {
+		name := stringifyAny(toolUse.block["name"])
+		if strings.TrimSpace(name) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // lastSSEBoundary 返回最后一个完整事件边界的结束位置，找不到返回 -1。
@@ -267,6 +281,11 @@ func convertMessagesSSE(text string, st *messagesSSEState) string {
 				}))
 			case "tool_use":
 				outputIndex := st.outputIndexForBlock(idx)
+				// 缺 name / 纯空白 name：不能作为可执行工具调用下发。
+				if strings.TrimSpace(stringifyAny(block["name"])) == "" {
+					st.droppedToolCalls++
+					continue
+				}
 				// 先以空入参生成骨架，实际入参靠 input_json_delta 累积。
 				// 首帧状态用 in_progress + 空入参（与 Chat SSE 路径一致），
 				// 真实入参与 completed 状态在 content_block_stop 收尾时给出，
@@ -421,6 +440,24 @@ func convertMessagesSSE(text string, st *messagesSSEState) string {
 				content = append(content, map[string]any{
 					"type": "output_text", "text": finalizeSanitize(st.contentTextByIndex[idx]), "annotations": []any{},
 				})
+			}
+			// 对齐 cc-switch：上游声明 tool_use 但最终没有可执行调用时，即使带正文，
+			// 也应报 failed，避免“答一句就停、零报错”的静默收尾。
+			if st.droppedToolCalls > 0 && !st.hasEmittedToolCall() {
+				out.WriteString(sseFrame("response.failed", map[string]any{
+					"type": "response.failed",
+					"response": map[string]any{
+						"id": st.responseID, "object": "response", "status": "failed",
+						"created_at": st.createdAt,
+						"error": map[string]any{
+							"message": "upstream returned tool use(s) without a usable name",
+							"type":    "upstream_tool_call_dropped",
+						},
+					},
+				}))
+				out.WriteString("data: [DONE]\n\n")
+				st.done = true
+				return out.String()
 			}
 			if len(content) > 0 || len(st.toolUseByIndex) == 0 {
 				out.WriteString(sseFrame("response.output_item.done", map[string]any{

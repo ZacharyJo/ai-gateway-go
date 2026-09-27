@@ -23,6 +23,64 @@ func isSSE(resp *http.Response) bool {
 	return strings.Contains(strings.ToLower(ct), "text/event-stream")
 }
 
+// primeSSEEvent 读取上游 SSE 流的第一个完整事件（data 内容），用于交付前预检。
+// 返回 (首帧 data、是否已读到完整事件、已读原始字节、error)。
+// 只有“已读到完整事件”才算预检通过；上游迟迟不吐数据、或流在首个完整事件前结束，
+// 都返回 err（调用方可据此重试）。一旦读到完整事件，即使它是错误帧，也已读的字节
+// 必须由调用方回接，不能丢弃。
+func primeSSEEvent(r io.Reader, maxBytes int) (data string, complete bool, buffered []byte, err error) {
+	buf := make([]byte, 32*1024)
+	var pending []byte
+	var sawEOF bool
+	for len(pending) < maxBytes {
+		n, readErr := r.Read(buf)
+		if n > 0 {
+			pending = append(pending, buf[:n]...)
+			if end := lastSSEBoundary(string(pending)); end > 0 {
+				first := pending[:end]
+				frames := parseSSEFrames(string(first))
+				if len(frames) > 0 {
+					return frames[0].data, true, pending, nil
+				}
+			}
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				sawEOF = true
+				break
+			}
+			// 非 EOF：无论是否已有部分数据，都视为“首包前失败”。
+			return "", false, pending, readErr
+		}
+	}
+	// 达到 maxBytes 但没读到完整事件：fail-open，由调用方把已读字节接回正常交付。
+	if !sawEOF {
+		return "", false, pending, nil
+	}
+	// 流在首个完整事件前干净结束：视为失败，调用方可重试。
+	return "", false, pending, io.EOF
+}
+
+// isFailureSSEData 判断一个完整 SSE 事件的 data 载荷是否为失败终态。
+// 覆盖 Chat/Responses 的 error、response.failed 等形态；首帧即失败时应整体重打。
+func isFailureSSEData(data string) bool {
+	trimmed := strings.TrimSpace(data)
+	if trimmed == "" || trimmed == "[DONE]" {
+		return false
+	}
+	var doc map[string]any
+	if json.Unmarshal([]byte(trimmed), &doc) != nil {
+		return false
+	}
+	if _, has := doc["error"]; has {
+		return true
+	}
+	if t := stringifyAny(doc["type"]); t == "response.failed" || t == "response.incomplete" {
+		return true
+	}
+	return false
+}
+
 // sseEventTransformer 是 SSE 增量变换器的通用接口（toolShapeRepairer /
 // imageBridgeSSETransformer / MessagesSSETransformer 都实现它）。Push 返回可下发的文本
 // （可能为空=帧被吸收），Flush 处理流末尾残留。

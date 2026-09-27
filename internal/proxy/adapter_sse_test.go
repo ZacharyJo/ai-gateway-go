@@ -162,6 +162,25 @@ func TestMessagesSSEToolUseFlow(t *testing.T) {
 	}
 }
 
+func TestMessagesSSEDroppedToolFailsRound(t *testing.T) {
+	// 上游声明 tool_use 但 name 缺失：message_stop 时不得谎报 completed，应 failed。
+	sse := strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"m1","model":"m"}}`, ``,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1"}}`, ``,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}`, ``,
+		`data: {"type":"content_block_stop","index":0}`, ``,
+		`data: {"type":"message_stop"}`, ``,
+	}, "\n") + "\n"
+
+	out := pushAll(t, "m", sse)
+	if !strings.Contains(out, "response.failed") || !strings.Contains(out, "upstream_tool_call_dropped") {
+		t.Fatalf("dropped tool use should fail:\n%s", out)
+	}
+	if strings.Contains(out, "response.completed") {
+		t.Fatalf("dropped tool use must not complete:\n%s", out)
+	}
+}
+
 func TestMessagesSSEMixedToolAndTextUsesDenseIndexes(t *testing.T) {
 	sse := strings.Join([]string{
 		`data: {"type":"message_start","message":{"id":"msg_1","model":"m"}}`, ``,

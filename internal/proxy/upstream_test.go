@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -465,6 +466,120 @@ func TestForwardAdapterStreaming(t *testing.T) {
 	// 不应残留 Messages 事件名
 	if strings.Contains(body, "message_start") || strings.Contains(body, "content_block_delta") {
 		t.Errorf("raw Messages events leaked to client:\n%s", body)
+	}
+}
+
+func TestForwardStreamTruncationRetriesOnce(t *testing.T) {
+	clearProxyEnv(t)
+	var mu sync.Mutex
+	hits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		n := hits
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if n == 1 {
+			// 200 后不写任何数据，直接关闭连接：模拟“首包前断流”。
+			if hj, ok := w.(http.Hijacker); ok {
+				conn, _, _ := hj.Hijack()
+				_ = conn.Close()
+			}
+			return
+		}
+		_, _ = w.Write([]byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"deepseek-v4-flash\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer upstream.Close()
+
+	up := newTestUpstream(t, testConfig(upstream.URL))
+	// 适配路径 + 末项是待执行工具结果（模型应继续干活）：断流应自动重打
+	reqBody := `{"model":"deepseek-v4-flash","stream":true,"input":[{"type":"function_call_output","call_id":"c1","output":"done"}]}`
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(reqBody))
+	rr := httptest.NewRecorder()
+	if _, err := up.Forward(req.Context(), rr, req, 1); err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	// 第一次响应被截断后应原样重打
+	mu.Lock()
+	got := hits
+	mu.Unlock()
+	if got < 2 {
+		t.Fatalf("upstream hits = %d, want at least 2 (truncated first + retry)", got)
+	}
+	if !strings.Contains(rr.Body.String(), "response.completed") {
+		t.Errorf("retried stream should reach client: %q", rr.Body.String())
+	}
+}
+
+func TestForwardStreamPrimeFailureFrameRetries(t *testing.T) {
+	clearProxyEnv(t)
+	var mu sync.Mutex
+	hits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		n := hits
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if n == 1 {
+			// 首帧即失败终态：代理应丢弃并自动重打，而不是把失败帧交给客户端。
+			_, _ = w.Write([]byte(`data: {"type":"error","error":{"type":"server_error","message":"upstream broken"}}` + "\n\n"))
+			return
+		}
+		_, _ = w.Write([]byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"deepseek-v4-flash\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer upstream.Close()
+
+	up := newTestUpstream(t, testConfig(upstream.URL))
+	reqBody := `{"model":"deepseek-v4-flash","stream":true,"input":[{"type":"function_call_output","call_id":"c1","output":"done"}]}`
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(reqBody))
+	rr := httptest.NewRecorder()
+	if _, err := up.Forward(req.Context(), rr, req, 1); err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	mu.Lock()
+	got := hits
+	mu.Unlock()
+	if got < 2 {
+		t.Fatalf("upstream hits = %d, want at least 2 (failed first frame + retry)", got)
+	}
+	if strings.Contains(rr.Body.String(), "upstream broken") {
+		t.Errorf("failed first frame leaked to client: %q", rr.Body.String())
+	}
+}
+
+func TestForwardStreamPrimeDoesNotRetryAfterOutput(t *testing.T) {
+	clearProxyEnv(t)
+	var mu sync.Mutex
+	hits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// 第一个完整事件是正常 message_start（有效首帧）：即使随后立刻断流，也按已产出处理，
+		// 不整体重打（对齐 cc-switch 只预检首帧的语义）。
+		_, _ = w.Write([]byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"deepseek-v4-flash\"}}\n\n"))
+	}))
+	defer upstream.Close()
+
+	up := newTestUpstream(t, testConfig(upstream.URL))
+	reqBody := `{"model":"deepseek-v4-flash","stream":true,"input":[{"type":"function_call_output","call_id":"c1","output":"done"}]}`
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(reqBody))
+	rr := httptest.NewRecorder()
+	if _, err := up.Forward(req.Context(), rr, req, 1); err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	mu.Lock()
+	got := hits
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("upstream hits = %d, want 1（有效首帧后不重试）", got)
 	}
 }
 

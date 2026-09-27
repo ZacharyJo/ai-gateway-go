@@ -129,6 +129,8 @@ func (u *Upstream) Forward(ctx context.Context, w http.ResponseWriter, r *http.R
 	// reasonTruncated 标记 reasoning-only 缓冲超限的截断交付：内容被掐断、尾部 usage 帧
 	// 大概率缺失，监控不按完整成功处理（见交付后的终态修正）。
 	reasonTruncated := false
+	// streamPrimeRetries 是 SSE 首包/首个语义帧预检失败后的自动重试次数。
+	streamPrimeRetries := 0
 	// 协议适配：非 GPT 模型的 POST /v1/responses 转成 Messages 打上游 /messages，响应再转回
 	// imageRetried 表示是否已经做过反应式图片降级重试（每次请求最多一次）
 	imageRetried := false
@@ -382,6 +384,49 @@ semanticRetry:
 			if adapt == nil {
 				repairTools = passthroughTools
 			}
+			// 对齐 cc-switch：交付前对适配路径的 200 SSE 做一次“首包/首个语义帧”预检。
+			// 若上游 200 后迟迟不吐数据、流在首个完整事件前就结束，或首帧就是失败终态，
+			// 丢弃该次尝试自动重打一次；一旦读到有效首帧就开始透传，不再整体回退。
+			if adapt != nil && isSSE(resp) && resp.StatusCode < http.StatusBadRequest &&
+				streamPrimeRetries < maxStreamPrimeRetries {
+				data, complete, buffered, primeErr := primeSSEEvent(resp.Body, streamPrimeMaxBytes)
+				if primeErr != nil || (!complete && len(buffered) == 0) {
+					resp.Body.Close()
+					streamPrimeRetries++
+					delay := u.policy.RetryAfterMs("", streamPrimeRetries, time.Now())
+					u.log.Warnf("stream_prime_retry req=%d %s %s err=%v bytes=%d retry=%d/%d retry_in=%dms",
+						reqID, r.Method, r.URL.Path, primeErr, len(buffered), streamPrimeRetries,
+						maxStreamPrimeRetries, delay.Milliseconds())
+					u.recordEvent(Event{Name: "stream_prime_retry", Level: "warn", ReqID: reqID,
+						Method: r.Method, Path: r.URL.Path, Status: resp.StatusCode, Source: source})
+					if !sleepCtx(ctx, delay) {
+						return res, ctx.Err()
+					}
+					continue
+				}
+				// 首帧即失败终态：也重打一次（但已读字节不得下发给客户端）。
+				if complete && isFailureSSEData(data) {
+					resp.Body.Close()
+					streamPrimeRetries++
+					delay := u.policy.RetryAfterMs("", streamPrimeRetries, time.Now())
+					u.log.Warnf("stream_prime_failed_frame req=%d %s %s retry=%d/%d retry_in=%dms",
+						reqID, r.Method, r.URL.Path, streamPrimeRetries,
+						maxStreamPrimeRetries, delay.Milliseconds())
+					u.recordEvent(Event{Name: "stream_prime_failed_frame", Level: "warn", ReqID: reqID,
+						Method: r.Method, Path: r.URL.Path, Status: resp.StatusCode, Source: source})
+					if !sleepCtx(ctx, delay) {
+						return res, ctx.Err()
+					}
+					continue
+				}
+				// 未触发重试：把已读字节接回原流，正常交付。
+				if len(buffered) > 0 {
+					resp.Body = struct {
+						io.Reader
+						io.Closer
+					}{io.MultiReader(bytes.NewReader(buffered), resp.Body), resp.Body}
+				}
+			}
 			kind, truncated := u.writeResponse(w, resp, capture, adapt, !isAnthropicNativePath(path), usage, repairTools, r)
 			res.InputTokens, res.OutputTokens = usage.in, usage.out
 			if kind != "" {
@@ -423,6 +468,15 @@ func readAllLimit(r io.Reader, limit int) (data []byte, truncated bool) {
 // drainHardTimeout 是丢弃可重试响应体时的硬超时：优先于 STREAM_IDLE_TIMEOUT_MS
 // （默认 10 分钟），避免上游 429/5xx body 挂死时重试背靠背被拖住。
 const drainHardTimeout = 5 * time.Second
+
+// maxStreamPrimeRetries 是 SSE 首包/首个语义帧预检失败后的自动重试次数。
+// 对齐 cc-switch：只在上游 200 后“首包前”失败或“首帧即失败终态”时丢弃重打，
+// 一旦开始产出内容就不整体回退。
+const maxStreamPrimeRetries = 1
+
+// streamPrimeMaxBytes 是首包预检的最大读取字节数。超过后 fail-open，
+// 把已读内容接回流正常交付，避免阻塞超大首帧。
+const streamPrimeMaxBytes = 256 * 1024
 
 // drainBodyWithTimeout 在 ctx 内丢弃至多 limit 字节：超时即放弃（由调用方 Close 释放连接），
 // 不阻塞重试循环。goroutine 在底层 Read 出错/Close 后自然退出，数量受重试配额封顶。

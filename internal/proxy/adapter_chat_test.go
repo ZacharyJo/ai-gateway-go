@@ -85,12 +85,16 @@ func TestChatSSETransformerNoUsage(t *testing.T) {
 	}
 }
 
-// TestChatSSETransformerFlushEmptyStream 验证空流（无任何内容）直接 Flush 也能收尾。
+// TestChatSSETransformerFlushEmptyStream 验证空流（无任何内容）直接 Flush 时
+// 应按失败收尾，而不是谎报 completed（对齐 cc-switch stream_truncated）。
 func TestChatSSETransformerFlushEmptyStream(t *testing.T) {
 	tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
 	out := tr.Flush()
-	if !strings.Contains(out, "response.completed") {
-		t.Fatalf("completed missing on empty stream:\n%s", out)
+	if !strings.Contains(out, "response.failed") || !strings.Contains(out, "stream_truncated") {
+		t.Fatalf("empty stream should fail with stream_truncated:\n%s", out)
+	}
+	if strings.Contains(out, "response.completed") {
+		t.Fatalf("empty stream must not be completed:\n%s", out)
 	}
 }
 
@@ -108,6 +112,44 @@ func TestChatSSETransformerNoOrphanDoneForIncompleteTool(t *testing.T) {
 	out2 := tr2.Push(`{"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_2","function":{"name":"bash","arguments":"{}"}}]},"finish_reason":"stop"}]}`) + tr2.Flush()
 	if !strings.Contains(out2, "function_call_arguments.done") {
 		t.Errorf("normal tool call should get .done:\n%s", out2)
+	}
+}
+
+func TestChatSSETransformerDroppedToolFailsRound(t *testing.T) {
+	tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+	// 上游声明工具调用但 name 缺失：收尾时不得谎报 completed，应 failed。
+	out := tr.Push(`{"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1"}]},"finish_reason":"stop"}]}`) + tr.Flush()
+	if !strings.Contains(out, "response.failed") || !strings.Contains(out, "upstream_tool_call_dropped") {
+		t.Fatalf("dropped tool round should fail with upstream_tool_call_dropped:\n%s", out)
+	}
+	if strings.Contains(out, "response.completed") {
+		t.Fatalf("dropped tool round must not be completed:\n%s", out)
+	}
+}
+
+func TestChatSSETransformerDroppedToolKeepsOtherOutput(t *testing.T) {
+	tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+	// 既有正文又有缺 name 的工具调用：cc-switch 仍判失败，因为模型本应继续工具链，
+	// 却只剩一个空工具调用；不能把这种“答一句就停”伪装成 completed。
+	out := tr.Push(`{"id":"c","choices":[{"index":0,"delta":{"content":"Done"},"finish_reason":null}]}`)
+	out += tr.Push(`{"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"bad"}]},"finish_reason":"stop"}]}`)
+	out += tr.Flush()
+	if !strings.Contains(out, "response.failed") || !strings.Contains(out, "upstream_tool_call_dropped") {
+		t.Fatalf("round with text + dropped tool should fail:\n%s", out)
+	}
+	if strings.Contains(out, "response.completed") {
+		t.Fatalf("round with dropped tool must not complete:\n%s", out)
+	}
+}
+
+func TestChatSSETransformerStreamErrorFails(t *testing.T) {
+	tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+	out := tr.Push(`data: {"error":{"message":"quota exceeded","type":"rate_limit_exceeded"}}`) + tr.Flush()
+	if !strings.Contains(out, "response.failed") || !strings.Contains(out, "quota exceeded") {
+		t.Fatalf("stream error should fail with payload:\n%s", out)
+	}
+	if strings.Contains(out, "response.completed") {
+		t.Fatalf("stream error must not complete:\n%s", out)
 	}
 }
 
