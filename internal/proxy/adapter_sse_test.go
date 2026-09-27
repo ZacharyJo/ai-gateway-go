@@ -181,6 +181,36 @@ func TestMessagesSSEDroppedToolFailsRound(t *testing.T) {
 	}
 }
 
+func TestMessagesSSENoMessageStopEmptyOutputFails(t *testing.T) {
+	// 只到了 message_start 流就结束、一个内容块都没有：按 stream_truncated 报 failed，
+	// 不能留一条只有 [DONE]、没有终态帧的断尾流。
+	sse := `data: {"type":"message_start","message":{"id":"m1","model":"m"}}` + "\n\n"
+	out := pushAll(t, "m", sse)
+	if !strings.Contains(out, "response.failed") || !strings.Contains(out, "stream_truncated") {
+		t.Fatalf("无 message_stop 的空输出流应 failed/stream_truncated:\n%s", out)
+	}
+	if strings.Contains(out, "response.completed") {
+		t.Fatalf("不得谎报 completed:\n%s", out)
+	}
+}
+
+func TestMessagesSSENoMessageStopWithDroppedToolFails(t *testing.T) {
+	// 声明了 tool_use 但没有合法 name，且流在 message_stop 之前结束：
+	// 口径与收到 message_stop 时一致，按 upstream_tool_call_dropped 报 failed。
+	sse := strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"m1","model":"m"}}`, ``,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1"}}`, ``,
+		`data: {"type":"content_block_stop","index":0}`, ``,
+	}, "\n") + "\n"
+	out := pushAll(t, "m", sse)
+	if !strings.Contains(out, "response.failed") || !strings.Contains(out, "upstream_tool_call_dropped") {
+		t.Fatalf("丢弃工具调用 + 无 message_stop 应 failed/upstream_tool_call_dropped:\n%s", out)
+	}
+	if strings.Contains(out, "response.completed") {
+		t.Fatalf("不得谎报 completed:\n%s", out)
+	}
+}
+
 func TestMessagesSSEMixedToolAndTextUsesDenseIndexes(t *testing.T) {
 	sse := strings.Join([]string{
 		`data: {"type":"message_start","message":{"id":"msg_1","model":"m"}}`, ``,
