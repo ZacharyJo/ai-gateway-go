@@ -897,8 +897,6 @@ type ChatSSETransformer struct {
 	// 否则 response.completed 永远缺 usage。
 	finishPending bool
 	finishModel   string // 挂起中的 model
-	// 流内错误帧（event:error / data 带 error）已转成失败终态。
-	failed bool
 	// 上游声明了工具调用但最终没留下任何可执行调用（缺 name / 空白 name）。
 	// 对齐 cc-switch：这种“答一句就停、零报错”的空工具回合应报 failed 而非 completed。
 	droppedToolCalls int

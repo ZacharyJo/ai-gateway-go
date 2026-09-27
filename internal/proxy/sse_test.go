@@ -157,13 +157,13 @@ func TestPrimeSSEEvent(t *testing.T) {
 	}
 
 	// 空流：返回 io.EOF（调用方据此重试）。
-	_, complete, buffered, err = primeSSEEvent(strings.NewReader(""), 1024)
+	_, complete, _, err = primeSSEEvent(strings.NewReader(""), 1024)
 	if err == nil || !errors.Is(err, io.EOF) || complete {
 		t.Fatalf("empty stream: err=%v complete=%v, want EOF", err, complete)
 	}
 
 	// 非 EOF 断流且无任何数据：返回该错误。
-	_, complete, buffered, err = primeSSEEvent(&truncatedReader{err: errors.New("read tcp: reset")}, 1024)
+	_, complete, _, err = primeSSEEvent(&truncatedReader{err: errors.New("read tcp: reset")}, 1024)
 	if err == nil || complete {
 		t.Fatalf("truncated empty stream: err=%v complete=%v, want error", err, complete)
 	}
