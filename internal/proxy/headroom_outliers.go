@@ -4,7 +4,7 @@ import (
 	"sort"
 )
 
-// 结构离群检测（对应 ai-gateway headroom/json_outliers.mjs）：
+// 结构离群检测（对应原始 JS 实现 headroom/json_outliers.mjs）：
 // 找出"稀有字段"与"稀有取值"所在项，压缩采样时保留它们避免丢失异常信息。
 
 // valueKey 生成值的去重/比较键（对应 valueKey）：null → __null__；原始类型 → 字面量；其余 → JSON。

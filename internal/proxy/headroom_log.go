@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// 日志行精选（对应 ai-gateway headroom/log_compressor.mjs）。
+// 日志行精选（对应原始 JS 实现 headroom/log_compressor.mjs）。
 
 var reErrorLevel = regexp.MustCompile(`(?i)npm ERR!|\b(?:error|exception|fatal|critical|panic|segfault|assertionerror|traceback)\b`)
 var reFailLevel = regexp.MustCompile(`(?i)\b(?:fail|failed|denied|timeout|timed out|cannot|unable)\b`)

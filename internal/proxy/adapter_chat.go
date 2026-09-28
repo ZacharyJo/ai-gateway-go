@@ -818,7 +818,7 @@ func int64val(v any) int64 {
 }
 
 // normalizeExecCommandArgs 归一 exec_command 工具的参数，兼容不同模型对命令工具的字段拼写差异
-// （参考 ai-gateway responses_chat 的 normalizeToolArguments 思路）：
+// （参考原始 JS 实现 responses_chat 的 normalizeToolArguments 思路）：
 //   - command → cmd（有的模型发 command，有的发 cmd）
 //   - timeout → yield_time_ms（钳制到 250-30000ms）
 //

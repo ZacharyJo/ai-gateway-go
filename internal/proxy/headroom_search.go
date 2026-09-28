@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// 搜索结果压缩（对应 ai-gateway headroom/search_compressor.mjs）。
+// 搜索结果压缩（对应原始 JS 实现 headroom/search_compressor.mjs）。
 
 // searchMatch 是一条解析出的 "file:line:content" 匹配。
 type searchMatch struct {
