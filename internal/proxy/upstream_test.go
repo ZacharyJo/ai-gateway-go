@@ -997,3 +997,39 @@ func TestAdaptErrorBody(t *testing.T) {
 		}
 	}
 }
+
+// TestForwardStreamPrimeTerminalErrorNotRetried 验证首包预检遇到**终态**错误
+// （指纹重放冷却）时不重打：对它重试必然失败且会延长冷却（见 stream_limits.go）。
+// 回归：此前预检只看 isFailureSSEData（任何非 nil error）就重打。
+func TestForwardStreamPrimeTerminalErrorNotRetried(t *testing.T) {
+	clearProxyEnv(t)
+	var mu sync.Mutex
+	hits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// 首帧即终态错误：不得重打，应原样交付给客户端。
+		_, _ = w.Write([]byte(`data: {"type":"error","error":{"type":"fingerprint_replay_cooldown","message":"prompt 重放冷却，请稍后再试"}}` + "\n\n"))
+	}))
+	defer upstream.Close()
+
+	up := newTestUpstream(t, testConfig(upstream.URL))
+	reqBody := `{"model":"deepseek-v4-flash","stream":true,"input":[{"type":"function_call_output","call_id":"c1","output":"done"}]}`
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(reqBody))
+	rr := httptest.NewRecorder()
+	if _, err := up.Forward(req.Context(), rr, req, 1); err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	mu.Lock()
+	got := hits
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("upstream hits = %d, want 1（终态错误不得重打）", got)
+	}
+	if !strings.Contains(rr.Body.String(), "fingerprint_replay_cooldown") {
+		t.Errorf("终态错误应原样交付客户端:\n%s", rr.Body.String())
+	}
+}

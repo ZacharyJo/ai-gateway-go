@@ -479,3 +479,68 @@ func TestIsFailureSSEDataNullErrorIsNotFailure(t *testing.T) {
 		t.Error("非 nil error 应判为失败终态")
 	}
 }
+
+// TestStreamSSEChatBareDoneSynthesizesFailure 验证"裸 [DONE] 空轮"（上游只发了一帧 [DONE]、
+// 没有任何协议帧）按截断失败收尾：客户端拿不到 response.completed 会自行重试
+// （见 codex codex-rs/core/tests/suite/stream_no_completed.rs），代理不该把它记成 200 成功。
+// 与 Messages 路径同口径（见 TestStreamSSEAdaptedBareDoneSynthesizesFailure）。
+func TestStreamSSEChatBareDoneSynthesizesFailure(t *testing.T) {
+	rr := httptest.NewRecorder()
+	tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+	_, truncated := streamSSEChat(rr, &truncatedReader{data: []byte("data: [DONE]\n\n"), err: io.EOF}, tr)
+	out := rr.Body.String()
+	if !truncated {
+		t.Errorf("裸 [DONE] 空轮应上报截断:\n%s", out)
+	}
+	if !strings.Contains(out, "response.failed") || !strings.Contains(out, "stream_truncated") {
+		t.Errorf("应合成 response.failed(stream_truncated):\n%s", out)
+	}
+	if !strings.HasSuffix(out, "data: [DONE]\n\n") {
+		t.Errorf("应以 [DONE] 收尾:\n%q", out)
+	}
+}
+
+// TestStreamSSEAdaptedBareDoneSynthesizesFailure 验证 Messages 路径的裸 [DONE] 空轮同样按
+// 截断失败收尾：上游的 [DONE] 被吞掉，由 synthesizeTerminal 统一补终态 + [DONE]。
+func TestStreamSSEAdaptedBareDoneSynthesizesFailure(t *testing.T) {
+	rr := httptest.NewRecorder()
+	tr := newMessagesSSETransformer("m", nil)
+	_, truncated := streamSSEAdapted(rr, &truncatedReader{data: []byte("data: [DONE]\n\n"), err: io.EOF}, tr)
+	out := rr.Body.String()
+	if !truncated {
+		t.Errorf("裸 [DONE] 空轮应上报截断:\n%s", out)
+	}
+	if !strings.Contains(out, "response.failed") || !strings.Contains(out, "stream_truncated") {
+		t.Errorf("应合成 response.failed(stream_truncated):\n%s", out)
+	}
+	if !strings.HasSuffix(out, "data: [DONE]\n\n") {
+		t.Errorf("应以 [DONE] 收尾:\n%q", out)
+	}
+}
+
+// TestStreamSSEChatTrulyEmptyStillTruncated 对照：一个字节都没收到的**完全空流**仍按
+// stream_truncated 失败上报——裸 [DONE] 门的例外只覆盖"上游声明了结束"的情形。
+func TestStreamSSEChatTrulyEmptyStillTruncated(t *testing.T) {
+	rr := httptest.NewRecorder()
+	tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+	_, truncated := streamSSEChat(rr, &truncatedReader{data: nil, err: io.EOF}, tr)
+	out := rr.Body.String()
+	if !truncated {
+		t.Error("完全空流应上报 truncated=true")
+	}
+	if !strings.Contains(out, "response.failed") || !strings.Contains(out, "stream_truncated") {
+		t.Errorf("完全空流应报 response.failed(stream_truncated):\n%s", out)
+	}
+}
+
+// TestStreamSSEChatEventsWithoutFinishStillTruncated 对照：发过协议帧但没到 finish_reason
+// 时仍算截断（有产出但没收尾，不能谎报成功）。
+func TestStreamSSEChatEventsWithoutFinishStillTruncated(t *testing.T) {
+	chunk := `data: {"id":"c","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}` + "\n\n"
+	rr := httptest.NewRecorder()
+	tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+	_, truncated := streamSSEChat(rr, &truncatedReader{data: []byte(chunk), err: io.EOF}, tr)
+	if !truncated {
+		t.Error("发过协议帧但无 finish_reason 应上报截断")
+	}
+}

@@ -350,9 +350,15 @@ func TestMessagesSSEError(t *testing.T) {
 	}
 }
 
-func TestMessagesSSEDonePassthrough(t *testing.T) {
-	if out := pushAll(t, "m", "data: [DONE]\n\n"); out != "data: [DONE]\n\n" {
-		t.Errorf("[DONE] passthrough = %q", out)
+func TestMessagesSSEDoneSwallowed(t *testing.T) {
+	// 上游的 [DONE] 一律吞掉、不原样转发：否则客户端在首个 [DONE] 处停读，
+	// synthesizeTerminal 补的终态帧永远到不了它。终态帧由 Flush 统一补。
+	out := pushAll(t, "m", "data: [DONE]\n\n")
+	if !strings.Contains(out, "response.failed") || !strings.Contains(out, "stream_truncated") {
+		t.Errorf("裸 [DONE] 应由 synthesizeTerminal 补 response.failed(stream_truncated):\n%s", out)
+	}
+	if !strings.HasSuffix(out, "data: [DONE]\n\n") {
+		t.Errorf("应以 [DONE] 收尾:\n%s", out)
 	}
 }
 
@@ -533,18 +539,22 @@ func TestMessagesSSETerminalBeforeForwardedDone(t *testing.T) {
 	}
 }
 
-func TestMessagesSSEBareDoneNotTruncated(t *testing.T) {
-	// 裸 [DONE]（全程无协议事件）原样透传，且不算截断/失败——否则空轮被误记 503。
+func TestMessagesSSEBareDoneSynthesizesFailure(t *testing.T) {
+	// 裸 [DONE]（全程无协议事件）按截断失败收尾：客户端拿不到 message_stop 会自行重试
+	//（见 codex codex-rs/core/tests/suite/stream_no_completed.rs），不该记 200 成功。
 	tr := newMessagesSSETransformer("m", nil)
 	out := tr.Push("data: [DONE]\n\n") + tr.Flush()
-	if tr.ProtocolIncomplete() {
-		t.Error("裸 [DONE] 流不应算截断")
+	if !tr.ProtocolIncomplete() {
+		t.Error("裸 [DONE] 流应算截断")
 	}
-	if tr.TerminalFailed() {
-		t.Error("裸 [DONE] 流不应算失败终态")
+	if !tr.TerminalFailed() {
+		t.Error("裸 [DONE] 流应算失败终态")
 	}
-	if !strings.Contains(out, "data: [DONE]") {
-		t.Errorf("裸 [DONE] 应原样透传:\n%s", out)
+	if !strings.Contains(out, "response.failed") || !strings.Contains(out, "stream_truncated") {
+		t.Errorf("应补 response.failed(stream_truncated):\n%s", out)
+	}
+	if !strings.HasSuffix(out, "data: [DONE]\n\n") {
+		t.Errorf("应以 [DONE] 收尾:\n%s", out)
 	}
 }
 

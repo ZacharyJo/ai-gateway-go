@@ -84,9 +84,6 @@ type messagesSSEState struct {
 	// sawMessageStop：上游发过 message_stop（协议正常终止事件）。流提前结束（截断）时
 	// 靠它区分"上游正常收尾"与"上游根本没走到终止事件"，据此补终态帧并上报截断。
 	sawMessageStop bool
-	// sawEvent：上游发过至少一个 Messages 协议事件。只有这种情况才在流提前结束时补终态帧——
-	// 裸 [DONE] 流按原样透传（客户端读到 [DONE] 即停读，其后补帧没有意义）。
-	sawEvent bool
 	// 上游声明了 tool_use 但最终没有合法 name（空/纯空白）：对齐 cc-switch，
 	// 本回合若没有任何可执行输出，最终应报 failed 而非 completed。
 	droppedToolCalls int
@@ -216,11 +213,7 @@ func (t *MessagesSSETransformer) Flush() string {
 // ProtocolIncomplete 报告上游是否缺了协议终止事件（message_stop）。
 // 适配路径据此把截断判定从 TCP 层（读错误）扩展到协议层：干净 EOF 但上游没正常收尾，
 // 客户端拿到的仍是不完整轮次，监控不应记成功。
-// 只在"上游发过协议事件"（sawEvent）时才判定：全程只有裸 [DONE] 的空轮按原样透传，
-// 不算截断（与 synthesizeTerminal 的 sawEvent 门一致）。
-func (t *MessagesSSETransformer) ProtocolIncomplete() bool {
-	return t.state.sawEvent && !t.state.sawMessageStop
-}
+func (t *MessagesSSETransformer) ProtocolIncomplete() bool { return !t.state.sawMessageStop }
 
 // TerminalFailed 报告本轮是否已下发失败终态（response.failed）。监控据此记非 200。
 func (t *MessagesSSETransformer) TerminalFailed() bool { return t.state.terminalFailed }
@@ -252,7 +245,7 @@ func (st *messagesSSEState) hasSubstantiveOutput() bool {
 // 完全空流报 stream_truncated；有产出则按截断收尾（response.incomplete），不谎报 completed。
 // 上游正常收尾、已发过终态、或全程只有裸 [DONE] 时返回空串（幂等）。
 func (st *messagesSSEState) synthesizeTerminal() string {
-	if st.done || st.sawMessageStop || !st.sawEvent {
+	if st.done || st.sawMessageStop {
 		return ""
 	}
 	st.done = true
@@ -314,14 +307,9 @@ func convertMessagesSSE(text string, st *messagesSSEState) string {
 			continue
 		}
 		if strings.TrimSpace(frame.data) == "[DONE]" {
-			// 上游发过协议事件（sawEvent）时吞掉这个 [DONE]：若原样转发，客户端会在首个
-			// [DONE] 处停读，Flush 补的截断终态帧（response.incomplete 等）永远到不了它——
-			// 正是"断尾流"要修的场景。交由 synthesizeTerminal 统一收尾（补终态 + [DONE]）。
-			// 裸 [DONE]（全程无协议事件）仍原样透传。
-			if st.sawEvent {
-				continue
-			}
-			out.WriteString("data: [DONE]\n\n")
+			// 一律吞掉上游的 [DONE]：若原样转发，客户端会在首个 [DONE] 处停读，Flush 补的
+			// 终态帧（response.incomplete / response.failed）永远到不了它——正是"断尾流"要修的
+			// 场景。交由 synthesizeTerminal 统一收尾（补终态 + [DONE]）。
 			continue
 		}
 		var parsed map[string]any
@@ -331,9 +319,6 @@ func convertMessagesSSE(text string, st *messagesSSEState) string {
 		eventType := stringifyAny(parsed["type"])
 		if eventType == "" {
 			eventType = frame.event
-		}
-		if eventType != "" {
-			st.sawEvent = true
 		}
 		switch {
 		case eventType == "message_start":
