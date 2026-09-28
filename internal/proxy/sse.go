@@ -313,7 +313,11 @@ func streamSSEAdapted(w http.ResponseWriter, body io.Reader, t sseEventTransform
 	// 不完整帧会被 parseSSEFrames 解析失败丢弃，不会把半截 JSON 发出去。
 	write(t.Flush())
 	// 干净结束或截断都统一收尾：有数据但上游没给 [DONE] 就补一帧，杜绝断尾流让客户端挂死。
+	// 经 wMu 串行化：tracker.finish 会直接写 w 并 Flush，与 keepalive goroutine 并发时需互斥。
+	//（当前 tracker.feed 已记过转换器发的 [DONE]、sawDone 为真使其成为 no-op，但不应依赖该守卫。）
+	wMu.Lock()
 	tracker.finish(w)
+	wMu.Unlock()
 	// 空流：与透传路径一致——上游 200 SSE 一个字节都没吐时补 [DONE] 并标记截断，
 	// 否则 Messages 适配路径的客户端会挂死等待、且被按干净成功记账。干净或截断的空流都算异常。
 	if !tracker.sawData {

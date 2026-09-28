@@ -2,6 +2,18 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)；main 合入使用 squash，每个 PR 对应一条记录。
 
+## [v0.3.2] - 2026-09-28
+
+### Fixed
+
+- **首包预检不再对终态错误重打**：预检遇到首帧即终态错误（如指纹重放冷却）时不再重打——重试必然失败且会延长冷却；改为原样交付，与交付路径的 `isTerminalStreamErrorKind` 口径一致。
+- **首包预检事件不再误计为错误**：`stream_prime_failed_frame` → `stream_prime_bad_frame`，避开 monitor `isError` 的 `"failed"` 子串启发式（这两个事件是 warn 级恢复动作，计成 error 会让错误 KPI 虚高）。
+- **`tracker.finish` 写入加锁**：与长思考保活 goroutine 并发写 `ResponseWriter` 时经 `wMu` 串行化（此前依赖 `sawDone` 守卫使其为 no-op，不应依赖）。
+
+### Changed
+
+- **裸 `[DONE]` 空轮按截断失败收尾**（Messages 路径与 Chat 路径同口径）：上游只发 `data: [DONE]`、没有任何协议帧时，代理吞掉该 `[DONE]` 并补 `response.failed`（`stream_truncated`）——客户端拿不到 `response.completed` 会自行重试，不再按 200 成功记账。此前 Messages 路径将其原样透传（v0.2.5 的"裸 `[DONE]` 原样透传"行为据此变更）。
+
 ## [v0.3.1] - 2026-09-28
 
 ### Changed

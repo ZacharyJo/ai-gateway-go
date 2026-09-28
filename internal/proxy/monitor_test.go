@@ -268,3 +268,20 @@ func TestMonitorRetrySuccessKeepsCleanSuccessRate(t *testing.T) {
 		t.Errorf("会话聚合的非200 = %+v, want 0", s.Sources)
 	}
 }
+
+// TestMonitorPrimeBadFrameNotCountedAsError 验证首包预检的“首帧不健康、已自动重打”事件
+// 不计入错误数：它是 warn 级的恢复动作（随后会重打，可能成功），计成 error 会让错误 KPI 虚高。
+// 回归：事件名曾叫 stream_prime_failed_frame，命中 isError 的 "failed" 子串被误计。
+func TestMonitorPrimeBadFrameNotCountedAsError(t *testing.T) {
+	m := NewMonitor(10)
+	m.Record(Event{Name: eventStreamPrimeBadFrame, Level: "warn", Status: 200})
+	m.Record(Event{Name: eventStreamPrimeRetry, Level: "warn", Status: 200})
+	if s := m.Snapshot(""); s.Errors != 0 {
+		t.Errorf("Errors = %d, want 0（首包预检的恢复动作不是错误）", s.Errors)
+	}
+	// 对照：真正的失败事件仍应计入（确保 isError 没被削弱）。
+	m.Record(Event{Name: "upstream_fetch_failed", Level: "error", Status: 0})
+	if s := m.Snapshot(""); s.Errors != 1 {
+		t.Errorf("Errors = %d, want 1（upstream_fetch_failed）", s.Errors)
+	}
+}

@@ -397,7 +397,7 @@ semanticRetry:
 					u.log.Warnf("stream_prime_retry req=%d %s %s err=%v bytes=%d retry=%d/%d retry_in=%dms",
 						reqID, r.Method, r.URL.Path, primeErr, len(buffered), streamPrimeRetries,
 						maxStreamPrimeRetries, delay.Milliseconds())
-					u.recordEvent(Event{Name: "stream_prime_retry", Level: "warn", ReqID: reqID,
+					u.recordEvent(Event{Name: eventStreamPrimeRetry, Level: "warn", ReqID: reqID,
 						Method: r.Method, Path: r.URL.Path, Status: resp.StatusCode, Source: source})
 					if !sleepCtx(ctx, delay) {
 						return res, ctx.Err()
@@ -405,19 +405,24 @@ semanticRetry:
 					continue
 				}
 				// 首帧即失败终态：也重打一次（但已读字节不得下发给客户端）。
+				// 例外：终态错误（如指纹重放冷却）重试必然失败且会延长冷却，不重打、按原样
+				// 交付——与交付路径的 isTerminalStreamErrorKind 口径一致（见 stream_limits.go）。
 				if complete && isFailureSSEData(data) {
-					resp.Body.Close()
-					streamPrimeRetries++
-					delay := u.policy.RetryAfterMs("", streamPrimeRetries, time.Now())
-					u.log.Warnf("stream_prime_failed_frame req=%d %s %s retry=%d/%d retry_in=%dms",
-						reqID, r.Method, r.URL.Path, streamPrimeRetries,
-						maxStreamPrimeRetries, delay.Milliseconds())
-					u.recordEvent(Event{Name: "stream_prime_failed_frame", Level: "warn", ReqID: reqID,
-						Method: r.Method, Path: r.URL.Path, Status: resp.StatusCode, Source: source})
-					if !sleepCtx(ctx, delay) {
-						return res, ctx.Err()
+					errKind := (&streamErrorDetector{}).feed(buffered)
+					if !isTerminalStreamErrorKind(errKind) {
+						resp.Body.Close()
+						streamPrimeRetries++
+						delay := u.policy.RetryAfterMs("", streamPrimeRetries, time.Now())
+						u.log.Warnf("stream_prime_bad_frame req=%d %s %s retry=%d/%d retry_in=%dms",
+							reqID, r.Method, r.URL.Path, streamPrimeRetries,
+							maxStreamPrimeRetries, delay.Milliseconds())
+						u.recordEvent(Event{Name: eventStreamPrimeBadFrame, Level: "warn", ReqID: reqID,
+							Method: r.Method, Path: r.URL.Path, Status: resp.StatusCode, Source: source})
+						if !sleepCtx(ctx, delay) {
+							return res, ctx.Err()
+						}
+						continue
 					}
-					continue
 				}
 				// 未触发重试：把已读字节接回原流，正常交付。
 				if len(buffered) > 0 {
@@ -477,6 +482,14 @@ const maxStreamPrimeRetries = 1
 // streamPrimeMaxBytes 是首包预检的最大读取字节数。超过后 fail-open，
 // 把已读内容接回流正常交付，避免阻塞超大首帧。
 const streamPrimeMaxBytes = 256 * 1024
+
+// 首包预检（stream prime）的事件名。刻意避开 "failed"/"error" 子串：monitor 的 isError
+// 启发式按名字子串判定，而这两个事件是 warn 级的恢复动作（随后会重打、可能成功），
+// 计成 error 会让错误 KPI 虚高。改名前请先看 monitor_test.go 的回归测试。
+const (
+	eventStreamPrimeRetry    = "stream_prime_retry"
+	eventStreamPrimeBadFrame = "stream_prime_bad_frame"
+)
 
 // drainBodyWithTimeout 在 ctx 内丢弃至多 limit 字节：超时即放弃（由调用方 Close 释放连接），
 // 不阻塞重试循环。goroutine 在底层 Read 出错/Close 后自然退出，数量受重试配额封顶。
