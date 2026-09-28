@@ -274,6 +274,8 @@ const (
 // convertToolDefinition 把 Responses 的工具定义转成 Messages 的 input_schema 形式。
 // function 直接映射；custom（freeform）包成单字符串参数；其余类型（tool_search/web_search
 // 等托管工具）Messages 侧没有对应载体，返回 nil 丢弃。
+// namespace 形状（codex 私有扩展）不会走到这里：applyCodexToolContext 已把它展开成带扁平名的
+// function / custom（见 codex_tools.go）。
 func convertToolDefinition(tool any) map[string]any {
 	m, ok := tool.(map[string]any)
 	if !ok {

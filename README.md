@@ -132,7 +132,7 @@ export ANTHROPIC_BASE_URL="http://127.0.0.1:8787/v1"
 Three fields are pinned deliberately — don't drop them when editing the file:
 
 - `tool_mode: "direct"` — codex uses plain structured tool calls. The client's `code_mode` / `code_mode_only` features both default to off, so this only makes the current behavior explicit; without it, a future client default would silently route adapted (non-GPT) models through Code Mode's freeform `exec` tool, which third-party models handle far less reliably.
-- `use_responses_lite: false` — keeps the tool definitions in the request's `tools` field. With `true`, the client sends them as an `additional_tools` item inside `input` instead, which the Messages/Chat adapter does not read, so no tools would reach the upstream at all.
+- `use_responses_lite: false` — keeps the tool definitions in the request's `tools` field. The adapter *does* handle the lite shape (tools carried by an `additional_tools` item inside `input`, grouped by namespaces that it flattens to `<ns>__<child>` and restores to `{name, namespace}` on the way back), so this is now a preference rather than a requirement: the classic shape combined with `tool_mode: "direct"` gives adapted (non-GPT) models plain structured tool calls instead of Code Mode's freeform `exec`.
 - `shell_type: "unified_exec"` — canonical spelling; `shell_command` (and `default` / `local`) are legacy aliases the client maps to the same value.
 
 ## License

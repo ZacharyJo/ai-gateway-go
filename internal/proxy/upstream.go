@@ -566,6 +566,9 @@ func (u *Upstream) prepareAdapter(r *http.Request, path string, body *[]byte, re
 				*body = b
 			}
 		}
+		// 透传路径原样转发 body（网关自己认 namespace 形状），因此这里不做展开：
+		// 载体里的 custom 工具不在 repairTools 里，tool_shape 修理对它们不生效。
+		// 已知限制——网关原生处理 namespace，改这里反而会破坏它。
 		return nil, collectCustomToolNames(doc["tools"])
 	}
 	// responses lite 形状：工具可能不在 tools 字段，而是声明在 input 的 additional_tools 载体里、
