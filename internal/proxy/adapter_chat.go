@@ -160,6 +160,12 @@ func inputToChatMessages(input any, systemText string, opts adapterOptions) ([]a
 		if stringifyAny(m["role"]) == "system" {
 			continue
 		}
+		// 工具载体项（additional_tools / tool_search_output）不是消息：它带 role 但没有 content，
+		// 落到下面的兜底路径会变成一条空 user 消息发给上游（严格网关因此 400，见
+		// isToolCarrierItem 注释）。工具已由 applyCodexToolContext 提取，这里只跳过。
+		if isToolCarrierItem(m) {
+			continue
+		}
 		// reasoning item：只入 pending，前向附挂到其后的 message / tool_calls。
 		if isStateOnlyItem(item) {
 			if r := extractReasoningSummaryText(m); r != "" {

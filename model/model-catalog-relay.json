@@ -23,7 +23,8 @@
           "description": "Extra high reasoning depth for complex problems"
         }
       ],
-      "shell_type": "shell_command",
+      "shell_type": "unified_exec",
+      "tool_mode": "direct",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 6,
@@ -95,7 +96,8 @@
           "description": "Extra high reasoning depth for complex problems"
         }
       ],
-      "shell_type": "shell_command",
+      "shell_type": "unified_exec",
+      "tool_mode": "direct",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 5,
@@ -167,7 +169,8 @@
           "description": "Extra high reasoning depth for complex problems"
         }
       ],
-      "shell_type": "shell_command",
+      "shell_type": "unified_exec",
+      "tool_mode": "direct",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 5,
@@ -239,7 +242,8 @@
           "description": "Extra high reasoning depth for complex problems"
         }
       ],
-      "shell_type": "shell_command",
+      "shell_type": "unified_exec",
+      "tool_mode": "direct",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 5,
@@ -311,7 +315,8 @@
           "description": "Extra high reasoning depth for complex problems"
         }
       ],
-      "shell_type": "shell_command",
+      "shell_type": "unified_exec",
+      "tool_mode": "direct",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 10,
@@ -383,7 +388,8 @@
           "description": "Extra high reasoning depth for complex problems"
         }
       ],
-      "shell_type": "shell_command",
+      "shell_type": "unified_exec",
+      "tool_mode": "direct",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 11,
@@ -455,7 +461,8 @@
           "description": "Extra high reasoning depth for complex problems"
         }
       ],
-      "shell_type": "shell_command",
+      "shell_type": "unified_exec",
+      "tool_mode": "direct",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 27,
@@ -535,7 +542,8 @@
           "description": "Maximum reasoning with automatic task delegation"
         }
       ],
-      "shell_type": "shell_command",
+      "shell_type": "unified_exec",
+      "tool_mode": "direct",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 0,
@@ -617,7 +625,8 @@
           "description": "Maximum reasoning with automatic task delegation"
         }
       ],
-      "shell_type": "shell_command",
+      "shell_type": "unified_exec",
+      "tool_mode": "direct",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 1,
@@ -699,7 +708,8 @@
           "description": "Maximum reasoning with automatic task delegation"
         }
       ],
-      "shell_type": "shell_command",
+      "shell_type": "unified_exec",
+      "tool_mode": "direct",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 2,
@@ -773,7 +783,8 @@
           "description": "Extra high reasoning depth for complex problems"
         }
       ],
-      "shell_type": "shell_command",
+      "shell_type": "unified_exec",
+      "tool_mode": "direct",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 3,
@@ -845,7 +856,8 @@
           "description": "Extra high reasoning depth for complex problems"
         }
       ],
-      "shell_type": "shell_command",
+      "shell_type": "unified_exec",
+      "tool_mode": "direct",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 14,
@@ -916,7 +928,8 @@
           "description": "Extra high reasoning depth for complex problems"
         }
       ],
-      "shell_type": "shell_command",
+      "shell_type": "unified_exec",
+      "tool_mode": "direct",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 15,
@@ -987,7 +1000,8 @@
           "description": "Extra high reasoning depth for complex problems"
         }
       ],
-      "shell_type": "shell_command",
+      "shell_type": "unified_exec",
+      "tool_mode": "direct",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 16,
@@ -1058,7 +1072,8 @@
           "description": "Extra high reasoning depth for complex problems"
         }
       ],
-      "shell_type": "shell_command",
+      "shell_type": "unified_exec",
+      "tool_mode": "direct",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 25,
@@ -1129,7 +1144,8 @@
           "description": "Extra high reasoning depth for complex problems"
         }
       ],
-      "shell_type": "shell_command",
+      "shell_type": "unified_exec",
+      "tool_mode": "direct",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 26,
@@ -1201,7 +1217,8 @@
           "description": "Extra high reasoning depth for complex problems"
         }
       ],
-      "shell_type": "shell_command",
+      "shell_type": "unified_exec",
+      "tool_mode": "direct",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 18,
@@ -1272,7 +1289,8 @@
           "description": "Extra high reasoning depth for complex problems"
         }
       ],
-      "shell_type": "shell_command",
+      "shell_type": "unified_exec",
+      "tool_mode": "direct",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 24,

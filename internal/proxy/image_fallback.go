@@ -43,8 +43,8 @@ func isImageUnsupportedError(body string) bool {
 }
 
 // rewriteBodyOmitImages 把图片块替换为占位文本，根据适配器类型选择正确的转换函数。
-// originalBody 是适配前的原始 Responses body；重新解析并以 OmitImages=true 适配。
-// 返回改写后的 body 和是否有实际修改。
+// originalBody 是适配前的原始 Responses body（快照，未经 prepareAdapter 改写）；重新解析并以
+// OmitImages=true 适配。返回改写后的 body 和是否有实际修改。
 func rewriteBodyOmitImages(originalBody []byte, adapt *adapterContext) ([]byte, bool) {
 	if len(originalBody) == 0 || adapt == nil {
 		return nil, false
@@ -53,8 +53,22 @@ func rewriteBodyOmitImages(originalBody []byte, adapt *adapterContext) ([]byte, 
 	if err := json.Unmarshal(originalBody, &doc); err != nil {
 		return nil, false
 	}
+	// 模型名用适配器归一后的名字：originalBody 是 prepareAdapter 改写前的快照，
+	// doc["model"] 仍是客户端原始拼写，而首次适配发给上游的是归一后的名字。
+	// 不覆盖的话，走别名表的模型（如 claude-opus-5 → "Opus 5"）在重试时会带上游不认的
+	// 拼写，图片降级从"挽救一次 400"变成"再吃一个 400/404"。
+	if adapt.normalizedModel != "" {
+		doc["model"] = adapt.normalizedModel
+	}
 	// 检查原始请求是否含图片，没有就不改写（避免无谓的解析）
 	if !requestHasImages(doc) {
+		return nil, false
+	}
+	// 这里拿的是**适配前**的原始 Responses body，工具可能还在 input 的 additional_tools 载体里
+	// （responses lite 形状）。必须与 prepareAdapter 一样先展开，否则重试请求会一个工具都不带。
+	// 回程还原表由 adapt.toolNamespaces 提供（首次适配时已算好），此处不必再传。
+	if _, err := applyCodexToolContext(doc); err != nil {
+		// 工具名冲突等无法展开：放弃改写，让调用方交付上游的原始错误响应。
 		return nil, false
 	}
 	// 重新适配，强制全部省略图片（含当前轮次的图片）
