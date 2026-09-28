@@ -332,7 +332,7 @@ func TestApplyToRawBody(t *testing.T) {
 	items := out["input"].([]any)
 	item0 := items[0].(map[string]any)
 	item1 := items[1].(map[string]any)
-	if !strings.HasPrefix(item0["output"].(string), "[ai-gateway headroom:") {
+	if !strings.HasPrefix(item0["output"].(string), "[codex-relay headroom:") {
 		t.Errorf("output[0] not compressed: %.60s", item0["output"])
 	}
 	if item1["content"] != "ok" {

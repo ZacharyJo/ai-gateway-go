@@ -1,4 +1,4 @@
-module ai-gateway-go
+module codex-relay
 
 go 1.26.4
 

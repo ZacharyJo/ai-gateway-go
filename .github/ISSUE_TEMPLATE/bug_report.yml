@@ -18,7 +18,7 @@ body:
     id: config
     attributes:
       label: Configuration
-      description: Relevant `~/.ai-gateway/config.toml` or env vars (redact any API keys / secrets)
+      description: Relevant `~/.codex-relay/config.toml` or env vars (redact any API keys / secrets)
       render: toml
       placeholder: |
         upstream_base = "https://..."
@@ -41,7 +41,7 @@ body:
     id: logs
     attributes:
       label: Logs
-      description: Relevant lines from `~/.ai-gateway/ai-gateway.log` (redact credentials)
+      description: Relevant lines from `~/.codex-relay/codex-relay.log` (redact credentials)
       render: text
     validations:
       required: false

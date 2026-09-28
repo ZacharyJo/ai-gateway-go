@@ -3,8 +3,8 @@
 # autostart.sh — 配置 proxy 开机自启（独立脚本，不依赖 setup.sh）。
 #
 # 平台支持：
-#   macOS  → launchd（~/Library/LaunchAgents/com.ai-gateway.proxy.plist）
-#   Linux  → systemd user 服务（~/.config/systemd/user/ai-gateway.service）
+#   macOS  → launchd（~/Library/LaunchAgents/com.codex-relay.proxy.plist）
+#   Linux  → systemd user 服务（~/.config/systemd/user/codex-relay.service）
 #
 # 用法：
 #   ./scripts/autostart.sh install    安装自启（写入 launchd/systemd，立即启动 proxy）
@@ -13,7 +13,7 @@
 #   ./scripts/autostart.sh template   打印平台对应的配置模板（不安装）
 #
 # 前置条件：
-#   - proxy 已安装（make install，即 ~/.ai-gateway/bin/proxy）
+#   - proxy 已安装（make install，即 ~/.codex-relay/bin/proxy）
 #   - 登录用户可写 ~/Library/LaunchAgents 或 ~/.config/systemd/user
 #
 # 说明：
@@ -24,12 +24,12 @@
 set -euo pipefail
 
 # ---------- 常量 ----------
-PROXY_HOME="${PROXY_HOME:-$HOME/.ai-gateway}"
+PROXY_HOME="${PROXY_HOME:-$HOME/.codex-relay}"
 PROXY_BIN="$PROXY_HOME/bin/proxy"
-LOG_DIR="$HOME/.ai-gateway"
-LAUNCHD_LABEL="com.ai-gateway.proxy"
+LOG_DIR="$HOME/.codex-relay"
+LAUNCHD_LABEL="com.codex-relay.proxy"
 LAUNCHD_PLIST="$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.plist"
-SYSTEMD_SERVICE="$HOME/.config/systemd/user/ai-gateway.service"
+SYSTEMD_SERVICE="$HOME/.config/systemd/user/codex-relay.service"
 
 # ---------- 工具函数 ----------
 log()  { printf '\033[1;32m[autostart]\033[0m %s\n' "$*"; }
@@ -54,7 +54,7 @@ install_darwin() {
   # 直接跑前台模式（proxy 不带参数），由 launchd 管理生命周期：
   # KeepAlive=true 在崩溃/退出后自动拉起。若用 `proxy start`（内部 fork 守护），
   # launchd 会以为进程已退出而反复重启，故这里用前台模式。
-  # 不设 StandardOutPath/StandardErrorPath：proxy 日志由 Logger 统一写 ai-gateway.log
+  # 不设 StandardOutPath/StandardErrorPath：proxy 日志由 Logger 统一写 codex-relay.log
   # （RotatingWriter 轮转），重定向 stdout/stderr 只会产生重复的 autostart.out/err。
   cat > "$LAUNCHD_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -105,10 +105,10 @@ install_linux() {
   # 直接跑前台模式（proxy 不带参数），由 systemd 管理生命周期：
   # Restart=on-failure 在异常退出后自动拉起。`proxy start` 内部 fork 守护进程后会立即返回，
   # systemd 会误判进程退出而反复重启，故这里用前台模式。
-  # 不重定向 stdout/stderr：proxy 日志由 Logger 统一写 ai-gateway.log。
+  # 不重定向 stdout/stderr：proxy 日志由 Logger 统一写 codex-relay.log。
   cat > "$SYSTEMD_SERVICE" <<EOF
 [Unit]
-Description=ai-gateway proxy
+Description=codex-relay proxy
 After=network-online.target
 
 [Service]
@@ -121,12 +121,12 @@ RestartSec=3
 WantedBy=default.target
 EOF
   systemctl --user daemon-reload
-  systemctl --user enable --now ai-gateway.service
+  systemctl --user enable --now codex-relay.service
   log "systemd 已配置并启动: $SYSTEMD_SERVICE"
 }
 
 uninstall_linux() {
-  systemctl --user disable --now ai-gateway.service 2>/dev/null || true
+  systemctl --user disable --now codex-relay.service 2>/dev/null || true
   rm -f "$SYSTEMD_SERVICE"
   systemctl --user daemon-reload
   log "systemd 已卸载: $SYSTEMD_SERVICE"
@@ -135,8 +135,8 @@ uninstall_linux() {
 status_linux() {
   if [ -f "$SYSTEMD_SERVICE" ]; then
     echo "systemd: 已配置 ($SYSTEMD_SERVICE)"
-    systemctl --user is-enabled ai-gateway.service 2>/dev/null && echo "  → 已启用" || echo "  → 未启用"
-    systemctl --user is-active ai-gateway.service 2>/dev/null && echo "  → 运行中" || echo "  → 未运行"
+    systemctl --user is-enabled codex-relay.service 2>/dev/null && echo "  → 已启用" || echo "  → 未启用"
+    systemctl --user is-active codex-relay.service 2>/dev/null && echo "  → 运行中" || echo "  → 未运行"
   else
     echo "systemd: 未配置"
   fi
@@ -145,15 +145,15 @@ status_linux() {
 # ---------- 模板输出 ----------
 template_darwin() {
   cat <<'EOF'
-# macOS launchd 自启模板（安装到 ~/Library/LaunchAgents/com.ai-gateway.proxy.plist）
-# 用 `launchctl load ~/Library/LaunchAgents/com.ai-gateway.proxy.plist` 加载
+# macOS launchd 自启模板（安装到 ~/Library/LaunchAgents/com.codex-relay.proxy.plist）
+# 用 `launchctl load ~/Library/LaunchAgents/com.codex-relay.proxy.plist` 加载
 # 注意：直接跑前台模式（不带 start 参数），由 launchd 的 KeepAlive 管理重启
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.ai-gateway.proxy</string>
+    <string>com.codex-relay.proxy</string>
     <key>ProgramArguments</key>
     <array>
         <string>__PROXY_BIN__</string>
@@ -171,11 +171,11 @@ EOF
 
 template_linux() {
   cat <<'EOF'
-# Linux systemd user 服务自启模板（安装到 ~/.config/systemd/user/ai-gateway.service）
-# 用 `systemctl --user enable --now ai-gateway.service` 启用
+# Linux systemd user 服务自启模板（安装到 ~/.config/systemd/user/codex-relay.service）
+# 用 `systemctl --user enable --now codex-relay.service` 启用
 # 注意：直接跑前台模式（不带 start 参数），由 systemd 的 Restart 管理重启
 [Unit]
-Description=ai-gateway proxy
+Description=codex-relay proxy
 After=network-online.target
 
 [Service]
@@ -232,7 +232,7 @@ case "$cmd" in
   status      查看自启状态
   template    打印当前平台的配置模板（不安装）
 
-前置条件: proxy 已安装（make install，即 ~/.ai-gateway/bin/proxy）
+前置条件: proxy 已安装（make install，即 ~/.codex-relay/bin/proxy）
 EOF
     ;;
   *)

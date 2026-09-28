@@ -11,7 +11,7 @@ import (
 // headroom 原文只对进行中的会话有用（/headroom-lite/<sha> 取回），过期即无价值。
 
 // retentionDirs 是受保留策略管理的子目录（相对 LOG_DIR）。
-var retentionDirs = []string{"headroom-lite-store", "ai-gateway-captures"}
+var retentionDirs = []string{"headroom-lite-store", "codex-relay-captures"}
 
 // retentionSweepInterval 是清理周期。产物过期粒度是小时级，不需要频繁扫。
 const retentionSweepInterval = time.Hour

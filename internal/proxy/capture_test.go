@@ -53,7 +53,7 @@ func TestCaptureWrite(t *testing.T) {
 	}
 	c.write(500, []byte(`{"error":{"message":"boom `+respSecret+`"}}`))
 
-	files, err := filepath.Glob(filepath.Join(dir, "ai-gateway-captures", "*status-500.json"))
+	files, err := filepath.Glob(filepath.Join(dir, "codex-relay-captures", "*status-500.json"))
 	if err != nil || len(files) != 1 {
 		t.Fatalf("capture files = %v (err %v), want 1", files, err)
 	}
@@ -82,7 +82,7 @@ func TestCaptureDisabled(t *testing.T) {
 	dir := t.TempDir()
 	c := &captureInfo{enabled: false, dir: dir, reqID: 1, method: "POST", path: "/x", reqBody: []byte("{}")}
 	c.write(500, []byte("boom"))
-	files, _ := filepath.Glob(filepath.Join(dir, "ai-gateway-captures", "*"))
+	files, _ := filepath.Glob(filepath.Join(dir, "codex-relay-captures", "*"))
 	if len(files) != 0 {
 		t.Errorf("disabled capture wrote files: %v", files)
 	}

@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"ai-gateway-go/internal/config"
+	"codex-relay/internal/config"
 )
 
 // 代理运行时环境变量 KEY（环境变量名即对外接口，部署脚本直接复用）。
@@ -274,7 +274,7 @@ func LoadConfigWith(pc *config.ProxyConfig) *Config {
 	return cfg
 }
 
-// defaultLogDir 返回代理运行产物的默认目录：~/.ai-gateway。
+// defaultLogDir 返回代理运行产物的默认目录：~/.codex-relay。
 // 日志、PID、ready、错误捕获、headroom 原文都放这里，避免堆进仓库；
 // 绝对路径也让 `proxy start` 从任意 cwd 启动时落到同一处。取不到 home 才回退相对 log/。
 func defaultLogDir() string {
@@ -282,7 +282,7 @@ func defaultLogDir() string {
 	if err != nil || home == "" {
 		return "log"
 	}
-	return filepath.Join(home, ".ai-gateway")
+	return filepath.Join(home, ".codex-relay")
 }
 
 // orDefault 返回指针指向的值；指针为 nil（config.toml 里未配置该项）时返回 def。

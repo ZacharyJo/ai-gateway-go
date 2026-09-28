@@ -2,6 +2,18 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)；main 合入使用 squash，每个 PR 对应一条记录。
 
+## [v0.3.0] - 2026-09-28
+
+### Changed
+
+- **项目更名为 `codex-relay`**（原 `ai-gateway-go`）：
+  - Go module 路径 `ai-gateway-go` → `codex-relay`（import 路径同步）。
+  - 运行时路径：默认目录 `~/.ai-gateway` → `~/.codex-relay`；日志 `ai-gateway.log` → `codex-relay.log`；守护进程文件 `ai-gateway.{pid,ready,out}` → `codex-relay.{pid,ready,out}`；错误捕获目录 `ai-gateway-captures` → `codex-relay-captures`。
+  - Headroom 压缩标记 `[ai-gateway headroom: …]` → `[codex-relay headroom: …]`；监控面板标题同步；Makefile / `scripts/autostart.sh`（launchd label、systemd 服务名）同步。
+  - README / examples / issue 模板 / PR 模板同步更新；client 配置示例 provider 名改为 `codex-relay`。
+
+  > **迁移**：把旧的 `~/.ai-gateway/config.toml` 移到 `~/.codex-relay/config.toml`（或用 `PROXY_CONFIG` 指向旧路径），再重启代理。旧目录下的日志/产物可按需迁移。
+
 ## [v0.2.6] - 2026-09-28
 
 ### Fixed

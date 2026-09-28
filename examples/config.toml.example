@@ -1,5 +1,5 @@
-# ~/.ai-gateway/config.toml 示例配置
-# 复制到 ~/.ai-gateway/config.toml 后按需填写。
+# ~/.codex-relay/config.toml 示例配置
+# 复制到 ~/.codex-relay/config.toml 后按需填写。
 # 可用 PROXY_CONFIG 环境变量覆盖配置文件路径。
 
 [proxy]

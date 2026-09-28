@@ -9,10 +9,10 @@ VERSION  ?= 0.1.0
 # 普通构建
 build:
 	mkdir -p $(DIST_DIR)
-	go build -ldflags "-X ai-gateway-go/internal/proxy.Version=$(VERSION)" -o $(PROXY_BIN) .
+	go build -ldflags "-X codex-relay/internal/proxy.Version=$(VERSION)" -o $(PROXY_BIN) .
 
-# 安装到 ~/.ai-gateway/bin（可用 PREFIX 覆盖）
-PREFIX ?= $(HOME)/.ai-gateway
+# 安装到 ~/.codex-relay/bin（可用 PREFIX 覆盖）
+PREFIX ?= $(HOME)/.codex-relay
 install: build
 	install -d $(PREFIX)/bin
 	install -m 0755 $(PROXY_BIN) $(PREFIX)/bin/proxy

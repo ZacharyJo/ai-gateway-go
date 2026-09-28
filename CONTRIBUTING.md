@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in contributing to ai-gateway-go!
+Thanks for your interest in contributing to codex-relay!
 
 ## Development
 

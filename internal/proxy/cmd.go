@@ -41,22 +41,22 @@ const daemonStopGrace = 5 * time.Second
 
 // pidFilePath 返回 PID 文件路径（放在日志目录下，与 log 同生命周期）。
 func pidFilePath(cfg *Config) string {
-	return filepath.Join(cfg.LogDir, "ai-gateway.pid")
+	return filepath.Join(cfg.LogDir, "codex-relay.pid")
 }
 
 // readyFilePath 返回守护就绪标记文件路径（子进程 bind 成功后写入自身 PID）。
 func readyFilePath(cfg *Config) string {
-	return filepath.Join(cfg.LogDir, "ai-gateway.ready")
+	return filepath.Join(cfg.LogDir, "codex-relay.ready")
 }
 
 // outFilePath 返回后台守护的 stdout/stderr 落盘路径。
 func outFilePath(cfg *Config) string {
-	return filepath.Join(cfg.LogDir, "ai-gateway.out")
+	return filepath.Join(cfg.LogDir, "codex-relay.out")
 }
 
 // logFilePath 返回代理自身日志路径（与 Logger 写的一致）。
 func logFilePath(cfg *Config) string {
-	return filepath.Join(cfg.LogDir, "ai-gateway.log")
+	return filepath.Join(cfg.LogDir, "codex-relay.log")
 }
 
 // readPID 读取 PID 文件；不存在或非法返回 error。

@@ -26,7 +26,7 @@ type captureInfo struct {
 	upstreamBase string
 }
 
-// writeCapture 把错误请求/响应落盘到 <dir>/ai-gateway-captures/<stamp>-req-<id>-status-<status>.json。
+// writeCapture 把错误请求/响应落盘到 <dir>/codex-relay-captures/<stamp>-req-<id>-status-<status>.json。
 // 落盘失败不影响响应（fail-open）。
 func (c *captureInfo) write(status int, respBody []byte) {
 	if c == nil || !c.enabled || c.dir == "" {
@@ -34,7 +34,7 @@ func (c *captureInfo) write(status int, respBody []byte) {
 	}
 	stamp := time.Now().UTC().Format("2006-01-02T15-04-05.000Z")
 	name := fmt.Sprintf("%s-req-%d-status-%d.json", stamp, c.reqID, status)
-	path := filepath.Join(c.dir, "ai-gateway-captures", name)
+	path := filepath.Join(c.dir, "codex-relay-captures", name)
 	payload := map[string]any{
 		"capturedAt":   time.Now().Format(time.RFC3339),
 		"upstreamBase": c.upstreamBase,
