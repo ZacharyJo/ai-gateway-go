@@ -2,6 +2,21 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)；main 合入使用 squash，每个 PR 对应一条记录。
 
+## [v0.2.6] - 2026-09-28
+
+### Fixed
+
+- **首包预检不再忙旋挂死**：`primeSSEEvent` 对 `(0,nil)` 空读加了次数上限——病理 reader（包装的 idle-timeout / gzip / MultiReader）反复空读时 fail-open 交回正常交付，而不是在写出任何响应字节前死循环。
+- **`"error":null` 不再误判为流失败**：Chat 路径（`Push`）与首包预检（`isFailureSSEData`）改用**非 nil** 判定。部分网关每个 chunk 都回显 `"error":null`，此前会被判成失败终态、丢弃整轮并白耗一次重打。
+- **截断流的终态帧不再被上游 `[DONE]` 挡在后面**：Messages 路径在有协议事件（`sawEvent`）时吞掉上游 `[DONE]`，由收尾统一补终态——否则客户端在首个 `[DONE]` 停读，补的终态帧永远看不到（v0.2.5 "杜绝断尾流"在该场景失效）。
+- **裸 `[DONE]` 空轮不再被记 503**：`ProtocolIncomplete` 尊重 `sawEvent` 门，与 `synthesizeTerminal` 口径一致。
+- **失败终态轮不再被记 200 成功**：新增 `TerminalFailed` 信号，Chat/Messages 两条适配路径合成的 `response.failed`（如 `upstream_tool_call_dropped`）现正确反映到 `request_finish` 状态。
+- **Messages 路径补长思考保活**：未闭合 `<thinking>` 缓冲期（对下游零输出）现与 Chat 路径一致发 SSE 注释帧，防客户端空闲超时断连。
+- **Chat 截断轮的工具丢弃分类修正**：无 `finish_reason` 截断时，被丢弃的工具调用现报 `upstream_tool_call_dropped`（此前恒报 `stream_truncated`，与 Messages 路径不一致）；同时消除 `flushFinish`/`Flush` 里的死分支。
+- **空白 name 占位可被真实 name 覆盖**：工具调用首帧 `name` 为纯空白、后续帧给真实 name 时不再永久卡死并误判丢弃。
+- **Messages `message_stop` 丢弃工具分支先收尾 message 项**：不再给客户端留 dangling `in_progress` 项。
+- **零交付的截断轮分类修正**：`hasSubstantiveOutput` 按收尾清洗后的文本判定，只有标签（如未闭合 `<thinking>`）的块不再被误判为"有产出"。
+
 ## [v0.2.5] - 2026-09-27
 
 ### Fixed

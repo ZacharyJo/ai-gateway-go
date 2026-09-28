@@ -903,6 +903,9 @@ type ChatSSETransformer struct {
 	// 上游声明了工具调用但最终没留下任何可执行调用（缺 name / 空白 name）。
 	// 对齐 cc-switch：这种“答一句就停、零报错”的空工具回合应报 failed 而非 completed。
 	droppedToolCalls int
+	// terminalFailed：本轮已下发 response.failed 终态（含协议正常终止但代理合成失败的情形）。
+	// 供监控据此记非 200，不把失败轮当成功。
+	terminalFailed bool
 }
 
 type chatToolCallState struct {
@@ -938,7 +941,8 @@ func (t *ChatSSETransformer) Push(data string) string {
 		return ""
 	}
 	// 流内错误帧：立即转成 response.failed，不再继续输出（对齐 cc-switch）。
-	if _, has := parsed["error"]; has {
+	// 只认非 nil 的 error：部分网关每个 chunk 都回显 "error":null，按键存在判定会误杀健康流。
+	if errVal, has := parsed["error"]; has && errVal != nil {
 		return t.emitFailed(parsed)
 	}
 	// usage 可能单独成帧（include_usage 的最后一个 chunk），也可能与 finish_reason 同帧，
@@ -1020,7 +1024,9 @@ func (t *ChatSSETransformer) processDelta(delta map[string]any, model string) st
 			}
 			fn, _ := tcm["function"].(map[string]any)
 			if fn != nil {
-				if name := stringifyAny(fn["name"]); name != "" && st.name == "" {
+				// 只用非空白 name，且允许用真实 name 覆盖先前到达的纯空白占位
+				// （分片首帧 name="   "、后续帧才给 "bash" 时不能永久卡在空白）。
+				if name := stringifyAny(fn["name"]); strings.TrimSpace(name) != "" && strings.TrimSpace(st.name) == "" {
 					st.name = name
 					st.custom = t.customTools[name]
 				}
@@ -1252,10 +1258,12 @@ func (t *ChatSSETransformer) flushFinish(model string) string {
 	// 收尾前冲刷未决的内嵌 <think> 缓冲，并收尾 reasoning 项（若还开着）。
 	out += t.flushInlineThink()
 	out += t.finalizeReasoning()
-	// 上游声明了工具调用但最终没留下任何可执行调用（缺 name/纯空白），
-	// 且本回合也没有其它可执行输出：对齐 cc-switch，直接 failed，不再发 completed。
+	// 先统计被丢弃的工具调用（缺 name/纯空白、从未 .added），再判定本回合终态。
+	t.countDroppedToolCalls()
+	// 上游声明了工具调用但最终没留下任何可执行调用，且本回合也没有其它可执行输出：
+	// 对齐 cc-switch，直接 failed，不再发 completed。
 	if t.droppedToolCalls > 0 && !t.hasEmittedToolCall() && !t.hasSubstantiveOutput() {
-		t.done = true
+		// 注意：不要先置 t.done——emitFailed 自身以 done 做幂等守卫，先置会让它直接返回空。
 		return out + t.emitFailed(map[string]any{
 			"error": map[string]any{
 				"message": "upstream returned tool call(s) without a usable function name",
@@ -1274,13 +1282,8 @@ func (t *ChatSSETransformer) flushFinish(model string) string {
 	for _, st := range stateOrder {
 		// 只有 index/name/id 分片、从未触发过 .added 的 tool call 不发收尾帧：
 		// 否则给客户端一个没有 output_item.added 配对的孤儿 .done（上游流中途断掉时）。
+		// 丢弃计数已由 countDroppedToolCalls 统一处理。
 		if !st.started {
-			// 上游声明了工具调用但最终没有合法 name（空/纯空白）：标记为被丢弃，
-			// 本回合若没有任何可执行输出，最终应报 failed 而非 completed。
-			if !st.dropped && strings.TrimSpace(st.name) == "" {
-				st.dropped = true
-				t.droppedToolCalls++
-			}
 			continue
 		}
 		// 流式累积的 args 是分片拼接的 JSON，收尾时归一 exec_command 参数
@@ -1375,6 +1378,7 @@ func (t *ChatSSETransformer) emitFailed(parsed map[string]any) string {
 	}
 	t.done = true
 	t.finishPending = false
+	t.terminalFailed = true
 	errPayload := parsed["error"]
 	if errPayload == nil {
 		errPayload = map[string]any{"message": "upstream stream error", "type": "stream_error"}
@@ -1402,6 +1406,21 @@ func (t *ChatSSETransformer) hasEmittedToolCall() bool {
 	}
 	return false
 }
+
+// countDroppedToolCalls 统计"从未 .added 且无合法 name"的工具调用，标记 dropped 并累加计数。
+// flushFinish（有 finish_reason）与 Flush（无 finish_reason 截断）都要先调用它，
+// 才能对同一种上游行为给出一致的失败分类。
+func (t *ChatSSETransformer) countDroppedToolCalls() {
+	for _, st := range t.toolCalls {
+		if !st.started && !st.dropped && strings.TrimSpace(st.name) == "" {
+			st.dropped = true
+			t.droppedToolCalls++
+		}
+	}
+}
+
+// TerminalFailed 报告本轮是否已下发失败终态（emitFailed）。监控据此记非 200。
+func (t *ChatSSETransformer) TerminalFailed() bool { return t.terminalFailed }
 
 // hasSubstantiveOutput 判断本回合是否已有可执行输出（正文、reasoning、合法工具调用）。
 // 用于无 finish_reason 断流时区分“有产出可保留”和“完全空流直接 failed”。
@@ -1442,6 +1461,9 @@ func (t *ChatSSETransformer) Flush() string {
 	// 无 finish_reason 直接结束：冲刷未决的内嵌 <think> 与 reasoning，再收尾。
 	out := t.flushInlineThink()
 	out += t.finalizeReasoning()
+	// 截断路径同样先统计被丢弃的工具调用（此前只在 flushFinish 里统计，导致无 finish_reason
+	// 的截断轮把 upstream_tool_call_dropped 误报成 stream_truncated）。
+	t.countDroppedToolCalls()
 	// 对齐 cc-switch：流在无 finish_reason 前结束，但有可执行输出/已丢弃工具调用时，
 	// 不再谎报 completed。完全空流则直接 failed；有产出则保留输出并按失败/完成处理。
 	if t.droppedToolCalls > 0 && !t.hasEmittedToolCall() {

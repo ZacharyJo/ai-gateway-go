@@ -90,6 +90,10 @@ type messagesSSEState struct {
 	// 上游声明了 tool_use 但最终没有合法 name（空/纯空白）：对齐 cc-switch，
 	// 本回合若没有任何可执行输出，最终应报 failed 而非 completed。
 	droppedToolCalls int
+	// terminalFailed：本轮已下发 response.failed 终态。供监控记非 200，不把失败轮当成功。
+	terminalFailed bool
+	// bufferingThink：当前有未闭合 think 块被缓冲（对下游零输出），流循环据此发保活帧。
+	bufferingThink bool
 }
 
 // MessagesSSETransformer 是有状态的增量转换器。
@@ -212,16 +216,31 @@ func (t *MessagesSSETransformer) Flush() string {
 // ProtocolIncomplete 报告上游是否缺了协议终止事件（message_stop）。
 // 适配路径据此把截断判定从 TCP 层（读错误）扩展到协议层：干净 EOF 但上游没正常收尾，
 // 客户端拿到的仍是不完整轮次，监控不应记成功。
-func (t *MessagesSSETransformer) ProtocolIncomplete() bool { return !t.state.sawMessageStop }
+// 只在"上游发过协议事件"（sawEvent）时才判定：全程只有裸 [DONE] 的空轮按原样透传，
+// 不算截断（与 synthesizeTerminal 的 sawEvent 门一致）。
+func (t *MessagesSSETransformer) ProtocolIncomplete() bool {
+	return t.state.sawEvent && !t.state.sawMessageStop
+}
+
+// TerminalFailed 报告本轮是否已下发失败终态（response.failed）。监控据此记非 200。
+func (t *MessagesSSETransformer) TerminalFailed() bool { return t.state.terminalFailed }
+
+// BufferingThink 报告当前是否处于未闭合 think 块缓冲期（对下游零输出）。
+// 流循环据此在缓冲期发保活注释帧，防客户端把长思考误判为断流。
+func (t *MessagesSSETransformer) BufferingThink() bool {
+	return t.state.bufferingThink
+}
 
 // hasSubstantiveOutput 判断本回合是否已有可执行输出（正文或合法工具调用）。
 // 用于流提前结束时区分"有产出可保留"与"完全空流直接 failed"。
+// 正文按收尾清洗后的文本判定：只有标签（如未闭合 <thinking>）的块清洗后为空，
+// 不算产出——否则零交付的截断轮会被误报成 response.incomplete。
 func (st *messagesSSEState) hasSubstantiveOutput() bool {
 	if st.hasEmittedToolCall() {
 		return true
 	}
 	for _, text := range st.contentTextByIndex {
-		if strings.TrimSpace(text) != "" {
+		if strings.TrimSpace(finalizeSanitize(text)) != "" {
 			return true
 		}
 	}
@@ -238,6 +257,7 @@ func (st *messagesSSEState) synthesizeTerminal() string {
 	}
 	st.done = true
 	failed := func(message, kind string) string {
+		st.terminalFailed = true // 供监控记非 200
 		return sseFrame("response.failed", map[string]any{
 			"type": "response.failed",
 			"response": map[string]any{
@@ -294,6 +314,13 @@ func convertMessagesSSE(text string, st *messagesSSEState) string {
 			continue
 		}
 		if strings.TrimSpace(frame.data) == "[DONE]" {
+			// 上游发过协议事件（sawEvent）时吞掉这个 [DONE]：若原样转发，客户端会在首个
+			// [DONE] 处停读，Flush 补的截断终态帧（response.incomplete 等）永远到不了它——
+			// 正是"断尾流"要修的场景。交由 synthesizeTerminal 统一收尾（补终态 + [DONE]）。
+			// 裸 [DONE]（全程无协议事件）仍原样透传。
+			if st.sawEvent {
+				continue
+			}
 			out.WriteString("data: [DONE]\n\n")
 			continue
 		}
@@ -404,7 +431,10 @@ func convertMessagesSSE(text string, st *messagesSSEState) string {
 				// 且避免逐帧对整段累积文本重跑正则的 O(n²)。
 				consumed := st.rawConsumedByIndex[idx]
 				pending := st.contentTextByIndex[idx][consumed:]
-				if safe, _ := streamSafeSplit(pending); safe != "" {
+				safe, hold := streamSafeSplit(pending)
+				// hold 非空表示尾部有未闭合 think 区段被缓冲（对下游零输出）：置保活标志。
+				st.bufferingThink = hold != ""
+				if safe != "" {
 					st.rawConsumedByIndex[idx] = consumed + len(safe)
 					if chunk := sanitizeAssistantText(safe); chunk != "" {
 						out.WriteString(sseFrame("response.output_text.delta", map[string]any{
@@ -504,7 +534,8 @@ func convertMessagesSSE(text string, st *messagesSSEState) string {
 					"created_at": st.createdAt, "error": errPayload},
 			}))
 			out.WriteString("data: [DONE]\n\n")
-			st.done = true // 终态：后续 message_stop 不能再翻成 completed
+			st.done = true           // 终态：后续 message_stop 不能再翻成 completed
+			st.terminalFailed = true // 供监控记非 200
 
 		case eventType == "message_stop":
 			st.sawMessageStop = true // 上游正常终止事件：Flush 不再补截断终态
@@ -517,6 +548,14 @@ func convertMessagesSSE(text string, st *messagesSSEState) string {
 			// 对齐 cc-switch：上游声明 tool_use 但最终没有可执行调用时，即使带正文，
 			// 也应报 failed，避免“答一句就停、零报错”的静默收尾。
 			if st.droppedToolCalls > 0 && !st.hasEmittedToolCall() {
+				// 已流式下发的 message 项先收尾：否则客户端留一个没有 .done 配对的
+				// dangling in_progress 项（与 Chat 路径先收尾文本项再 failed 对齐）。
+				if len(content) > 0 {
+					out.WriteString(sseFrame("response.output_item.done", map[string]any{
+						"type": "response.output_item.done", "output_index": st.ensureMessageOutputIndex(),
+						"item": map[string]any{"id": st.messageID, "type": "message", "status": "completed", "role": "assistant", "content": content},
+					}))
+				}
 				out.WriteString(sseFrame("response.failed", map[string]any{
 					"type": "response.failed",
 					"response": map[string]any{
@@ -530,6 +569,7 @@ func convertMessagesSSE(text string, st *messagesSSEState) string {
 				}))
 				out.WriteString("data: [DONE]\n\n")
 				st.done = true
+				st.terminalFailed = true
 				return out.String()
 			}
 			if len(content) > 0 || len(st.toolUseByIndex) == 0 {

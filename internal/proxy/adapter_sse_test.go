@@ -509,3 +509,89 @@ func TestMessagesSSECreatedAtIsUnixSeconds(t *testing.T) {
 		t.Errorf("created_at = %d, 太早（不在近年的 Unix 秒范围）", doc.Response.CreatedAt)
 	}
 }
+
+func TestMessagesSSETerminalBeforeForwardedDone(t *testing.T) {
+	// 上游发 message_start + text_delta + [DONE] 但没 message_stop：终态帧必须出现在客户端
+	// 读到的 [DONE] 之前，否则客户端在 [DONE] 停读、看不到终态（断尾流未被修复）。
+	sse := strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"m1","model":"m"}}`, ``,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`, ``,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`, ``,
+		`data: [DONE]`, ``,
+	}, "\n") + "\n"
+	out := pushAll(t, "m", sse)
+	if !strings.Contains(out, "response.incomplete") && !strings.Contains(out, "response.failed") {
+		t.Fatalf("截断流应补终态帧:\n%s", out)
+	}
+	doneIdx := strings.Index(out, "data: [DONE]")
+	termIdx := strings.Index(out, "response.incomplete")
+	if termIdx < 0 {
+		termIdx = strings.Index(out, "response.failed")
+	}
+	if doneIdx < 0 || termIdx > doneIdx {
+		t.Fatalf("终态帧必须在 [DONE] 之前: doneIdx=%d termIdx=%d\n%s", doneIdx, termIdx, out)
+	}
+}
+
+func TestMessagesSSEBareDoneNotTruncated(t *testing.T) {
+	// 裸 [DONE]（全程无协议事件）原样透传，且不算截断/失败——否则空轮被误记 503。
+	tr := newMessagesSSETransformer("m", nil)
+	out := tr.Push("data: [DONE]\n\n") + tr.Flush()
+	if tr.ProtocolIncomplete() {
+		t.Error("裸 [DONE] 流不应算截断")
+	}
+	if tr.TerminalFailed() {
+		t.Error("裸 [DONE] 流不应算失败终态")
+	}
+	if !strings.Contains(out, "data: [DONE]") {
+		t.Errorf("裸 [DONE] 应原样透传:\n%s", out)
+	}
+}
+
+func TestMessagesSSEDroppedToolFinalizesMessageItem(t *testing.T) {
+	// 有流式文本 + 无 name 的 tool_use + message_stop：报 failed 前应先收尾 message 项，
+	// 不留 dangling in_progress。
+	sse := strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"m1","model":"m"}}`, ``,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`, ``,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}`, ``,
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"t1","name":"","input":{}}}`, ``,
+		`data: {"type":"content_block_stop","index":1}`, ``,
+		`data: {"type":"message_stop"}`, ``,
+	}, "\n") + "\n"
+	out := pushAll(t, "m", sse)
+	if !strings.Contains(out, "upstream_tool_call_dropped") {
+		t.Fatalf("应报 upstream_tool_call_dropped:\n%s", out)
+	}
+	if !strings.Contains(out, "response.output_item.done") {
+		t.Errorf("message 项应先收尾（output_item.done）:\n%s", out)
+	}
+}
+
+func TestMessagesSSEOnlyUnclosedThinkingIsTruncated(t *testing.T) {
+	// 只有未闭合 <thinking>（清洗后为空、零交付）+ 无 message_stop：应报 stream_truncated
+	// 而非 response.incomplete（后者会让 codex 以为有产出）。
+	sse := strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"m1","model":"m"}}`, ``,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`, ``,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<thinking>"}}`, ``,
+	}, "\n") + "\n"
+	out := pushAll(t, "m", sse)
+	if !strings.Contains(out, "stream_truncated") {
+		t.Fatalf("零交付的未闭合 thinking 截断应报 stream_truncated:\n%s", out)
+	}
+	if strings.Contains(out, "response.incomplete") {
+		t.Errorf("不应报 response.incomplete:\n%s", out)
+	}
+}
+
+func TestMessagesSSEBufferingThinkDuringUnclosedThink(t *testing.T) {
+	// 未闭合 <thinking> 缓冲期（对下游零输出）应报告 BufferingThink=true，供流循环发保活帧。
+	tr := newMessagesSSETransformer("m", nil)
+	tr.Push(`data: {"type":"message_start","message":{"id":"m1","model":"m"}}` + "\n\n")
+	tr.Push(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n")
+	tr.Push(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<thinking>still going"}}` + "\n\n")
+	if !tr.BufferingThink() {
+		t.Error("未闭合 <thinking> 缓冲期应报告 BufferingThink=true")
+	}
+}
