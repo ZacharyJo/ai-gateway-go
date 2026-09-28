@@ -1,7 +1,7 @@
 // Package config 提供代理的独立配置加载（不依赖任何 wrapper）。
 //
 // 第三方独立部署时，配置来源为：环境变量 > PROXY_CONFIG 指定的 TOML 文件 > 内置默认。
-// 配置文件默认路径：~/.ai-gateway/config.toml（可用 PROXY_CONFIG 覆盖）。
+// 配置文件默认路径：~/.codex-relay/config.toml（可用 PROXY_CONFIG 覆盖）。
 package config
 
 import (
@@ -84,7 +84,7 @@ type ProxyConfig struct {
 }
 
 // Load 读取 TOML 配置文件并返回 [proxy] 段（nil 接收者安全）。
-// 配置文件路径：PROXY_CONFIG 环境变量指定；未指定时用 ~/.ai-gateway/config.toml。
+// 配置文件路径：PROXY_CONFIG 环境变量指定；未指定时用 ~/.codex-relay/config.toml。
 // 文件不存在或没有 [proxy] 段时返回零值段（所有字段未配置，走默认）。
 // 解析失败返回 error：半解析结果会把 *int 置 0，静默用比报错更危险。
 func Load() (ProxyConfig, error) {
@@ -94,7 +94,7 @@ func Load() (ProxyConfig, error) {
 		if err != nil {
 			return ProxyConfig{}, nil
 		}
-		path = filepath.Join(home, ".ai-gateway", "config.toml")
+		path = filepath.Join(home, ".codex-relay", "config.toml")
 	}
 	var wrapper struct {
 		Proxy ProxyConfig `toml:"proxy"`

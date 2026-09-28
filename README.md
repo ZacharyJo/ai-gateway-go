@@ -1,4 +1,4 @@
-# ai-gateway-go
+# codex-relay
 
 **English** | [简体中文](README.zh-CN.md)
 
@@ -11,7 +11,7 @@ It forwards `/v1/*` requests from AI clients (codex / claude / any OpenAI-compat
 - **SSE streaming**: in-stream soft-error detection, `[DONE]` fallback, idle-timeout watchdog
 - **Context compression (Headroom)**: significantly reduces repeated context, persisted by sha256 for traceability
 - **Monitoring dashboard**: `/dashboard` real-time panel with request success rate / latency / status-code distribution
-- **Log rotation + error capture**: `LOG_DIR/ai-gateway.log` auto-rotates; upstream error bodies can be captured (redacted) to disk
+- **Log rotation + error capture**: `LOG_DIR/codex-relay.log` auto-rotates; upstream error bodies can be captured (redacted) to disk
 - **Daemon subcommands**: `proxy start / stop / restart / status / logs` self-managed lifecycle
 
 ## Build & Run
@@ -19,12 +19,12 @@ It forwards `/v1/*` requests from AI clients (codex / claude / any OpenAI-compat
 ```bash
 make build           # build dist/<goos>-<goarch>/proxy
 make proxy-run       # run in foreground
-make install         # install to ~/.ai-gateway/bin/proxy
+make install         # install to ~/.codex-relay/bin/proxy
 ```
 
 ## Configuration
 
-Priority: **environment variables > `[proxy]` section of `~/.ai-gateway/config.toml` > built-in defaults**.
+Priority: **environment variables > `[proxy]` section of `~/.codex-relay/config.toml` > built-in defaults**.
 
 Minimal configuration (an upstream is required):
 
@@ -34,7 +34,7 @@ export API_KEY="sk-your-key"   # required when auth_mode=bearer
 proxy
 ```
 
-Or write a config file `~/.ai-gateway/config.toml` (override the path with the `PROXY_CONFIG` environment variable):
+Or write a config file `~/.codex-relay/config.toml` (override the path with the `PROXY_CONFIG` environment variable):
 
 ```toml
 [proxy]
@@ -72,7 +72,7 @@ api_key = "sk-your-key"
 Lets models that lack native image generation still produce/edit images. When enabled, the proxy injects a `bridge_imagegen` tool into requests: when the model calls it, the proxy forwards to the upstream image API (`/images/generations` or `/images/edits`), persists the image under `<log_dir>/generated-images/`, and writes the result back into the response.
 
 ```toml
-# ~/.ai-gateway/config.toml [proxy] section
+# ~/.codex-relay/config.toml [proxy] section
 bridge_imagegen_enabled = true            # enable
 image_model = "gpt-image-2.5-sunburst"    # upstream image model id
 image_size = "auto"                       # size
@@ -92,11 +92,11 @@ Requirements & usage:
 **codex** (`~/.codex/config.toml`):
 
 ```toml
-model_provider = "ai-gateway"
+model_provider = "codex-relay"
 model = "gpt-5.6-sol"
 
-[model_providers.ai-gateway]
-name = "ai-gateway"
+[model_providers.codex-relay]
+name = "codex-relay"
 base_url = "http://127.0.0.1:8787/v1"
 wire_api = "responses"
 ```

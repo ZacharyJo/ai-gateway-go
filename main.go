@@ -1,4 +1,4 @@
-// ai-gateway-go 是一个独立的本地 OpenAI 兼容代理服务。
+// codex-relay 是一个独立的本地 OpenAI 兼容代理服务。
 //
 // 用于把 AI 客户端（codex/claude 等）的 /v1/* 请求转发到第三方 OpenAI 兼容上游，
 // 提供协议适配（Responses↔Messages/Chat Completions）、重试、SSE 流式、Headroom
@@ -8,7 +8,7 @@ package main
 import (
 	"os"
 
-	"ai-gateway-go/internal/proxy"
+	"codex-relay/internal/proxy"
 )
 
 func main() {

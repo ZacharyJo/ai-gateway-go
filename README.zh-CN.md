@@ -1,4 +1,4 @@
-# ai-gateway-go
+# codex-relay
 
 [English](README.md) | **简体中文**
 
@@ -11,7 +11,7 @@
 - **SSE 流式**：流内软错误检测、`[DONE]` 兜底、空闲超时看护
 - **上下文压缩（Headroom）**：大幅减少重复上下文，按 sha256 落盘可回溯
 - **监控仪表盘**：`/dashboard` 实时面板，请求成功率/耗时/状态码分布
-- **日志轮转 + 错误捕获**：`LOG_DIR/ai-gateway.log` 自动轮转，上游错误响应可落盘脱敏
+- **日志轮转 + 错误捕获**：`LOG_DIR/codex-relay.log` 自动轮转，上游错误响应可落盘脱敏
 - **守护子命令**：`proxy start / stop / restart / status / logs` 自管生命周期
 
 ## 构建与运行
@@ -19,12 +19,12 @@
 ```bash
 make build           # 构建 dist/<goos>-<goarch>/proxy
 make proxy-run       # 前台运行
-make install         # 安装到 ~/.ai-gateway/bin/proxy
+make install         # 安装到 ~/.codex-relay/bin/proxy
 ```
 
 ## 配置
 
-优先级：**环境变量 > `~/.ai-gateway/config.toml` 的 `[proxy]` 段 > 内置默认**。
+优先级：**环境变量 > `~/.codex-relay/config.toml` 的 `[proxy]` 段 > 内置默认**。
 
 最小配置（必须指定上游）：
 
@@ -34,7 +34,7 @@ export API_KEY="sk-your-key"   # auth_mode=bearer 时需要
 proxy
 ```
 
-或写配置文件 `~/.ai-gateway/config.toml`（可用 `PROXY_CONFIG` 环境变量覆盖路径）：
+或写配置文件 `~/.codex-relay/config.toml`（可用 `PROXY_CONFIG` 环境变量覆盖路径）：
 
 ```toml
 [proxy]
@@ -72,7 +72,7 @@ api_key = "sk-your-key"
 让**不支持原生图片工具**的模型也能生成/编辑图片。开启后代理向请求注入 `bridge_imagegen` 工具：模型调用它时代理转调上游图片 API（`/images/generations` 或 `/images/edits`），图片落盘到 `<log_dir>/generated-images/`，并把结果写回响应。
 
 ```toml
-# ~/.ai-gateway/config.toml [proxy] 段
+# ~/.codex-relay/config.toml [proxy] 段
 bridge_imagegen_enabled = true            # 启用
 image_model = "gpt-image-2.5-sunburst"    # 上游图片模型 ID
 image_size = "auto"                       # 尺寸
@@ -92,11 +92,11 @@ image_output_format = "png"               # 落盘格式（png / jpeg / webp）
 **codex**（`~/.codex/config.toml`）：
 
 ```toml
-model_provider = "ai-gateway"
+model_provider = "codex-relay"
 model = "gpt-5.6-sol"
 
-[model_providers.ai-gateway]
-name = "ai-gateway"
+[model_providers.codex-relay]
+name = "codex-relay"
 base_url = "http://127.0.0.1:8787/v1"
 wire_api = "responses"
 ```

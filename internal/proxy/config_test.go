@@ -151,7 +151,7 @@ func TestLoadConfigTomlWithoutProxySection(t *testing.T) {
 }
 
 // clearProxyEnv 清空所有代理相关环境变量，并把 config.toml 指向不存在的路径，
-// 保证测试既不受宿主环境影响、也不读到本机真实的 ~/.ai-gateway/config.toml。
+// 保证测试既不受宿主环境影响、也不读到本机真实的 ~/.codex-relay/config.toml。
 func clearProxyEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("PROXY_CONFIG", filepath.Join(t.TempDir(), "no-such-config.toml"))

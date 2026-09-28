@@ -7,7 +7,7 @@ package proxy
 const dashboardHTML = `<!doctype html>
 <html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ai-gateway 监控</title>
+<title>codex-relay 监控</title>
 <style>
 :root {
   color-scheme: dark;
@@ -114,7 +114,7 @@ footer { margin-top: 1rem; color: var(--faint); font-size: .72rem; text-align: c
   <div class="brand">
     <div class="logo">&#9671;</div>
     <div>
-      <h1>ai-gateway 监控</h1>
+      <h1>codex-relay 监控</h1>
       <div class="sub" id="sub">加载中…</div>
     </div>
   </div>

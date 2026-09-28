@@ -283,7 +283,7 @@ func TestForwardCapturesSSEErrorBody(t *testing.T) {
 	if !strings.Contains(rr.Body.String(), "upstream failure") {
 		t.Errorf("SSE error body not forwarded: %q", rr.Body.String())
 	}
-	files, _ := filepath.Glob(filepath.Join(dir, "ai-gateway-captures", "*status-502.json"))
+	files, _ := filepath.Glob(filepath.Join(dir, "codex-relay-captures", "*status-502.json"))
 	if len(files) != 1 {
 		t.Fatalf("capture files = %v, want one SSE error capture", files)
 	}
@@ -683,7 +683,7 @@ func TestForwardHeadroomUpdatesContentLength(t *testing.T) {
 	}
 
 	// body 确实被压缩
-	if !bytes.Contains(gotBody, []byte("[ai-gateway headroom:")) {
+	if !bytes.Contains(gotBody, []byte("[codex-relay headroom:")) {
 		t.Errorf("body not compressed: %.80s", gotBody)
 	}
 	// headroom 改写了 body，Content-Length 必须等于实际长度（回归：修掉旧值覆盖 bug）

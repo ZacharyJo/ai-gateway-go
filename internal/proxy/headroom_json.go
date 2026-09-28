@@ -209,7 +209,7 @@ func formatJsonTable(items []any, maxItems int, hash string, originalChars int) 
 		}
 		rows = append(rows, strings.Join(cells, ","))
 	}
-	header := "[ai-gateway headroom: compressed tool output; kind=json_table; original_items=" +
+	header := "[codex-relay headroom: compressed tool output; kind=json_table; original_items=" +
 		itoa(len(items)) + "; kept_rows=" + itoa(len(sample)) + "; omitted_rows=" + itoa(max(0, len(items)-len(sample))) +
 		"; columns=" + strings.Join(columns, ",") + "; original_chars=" + itoa(originalChars) + "; sha256=" + hash + "]"
 	lines := []string{header, "[" + itoa(len(items)) + "]{" + strings.Join(schema, ",") + "}", strings.Join(columns, ",")}
@@ -237,7 +237,7 @@ func formatNestedJsonTable(key string, items []any, maxItems int) string {
 		}
 		rows = append(rows, strings.Join(cells, ","))
 	}
-	header := "[ai-gateway headroom table; key=" + key + "; original_items=" + itoa(len(items)) +
+	header := "[codex-relay headroom table; key=" + key + "; original_items=" + itoa(len(items)) +
 		"; kept_rows=" + itoa(len(sample)) + "; omitted_rows=" + itoa(max(0, len(items)-len(sample))) +
 		"; columns=" + strings.Join(columns, ",") + "]"
 	lines := []string{header, "[" + itoa(len(items)) + "]{" + strings.Join(schema, ",") + "}", strings.Join(columns, ",")}
@@ -271,7 +271,7 @@ func tryCompressJsonText(text string, maxItems int, hash string) *Compression {
 			return &Compression{Kind: "json_table", Compressed: formatJsonTable(arr, maxItems, hash, originalChars)}
 		}
 		sample := crushJsonArray(arr, maxItems)
-		header := "[ai-gateway headroom: compressed tool output; kind=json_array; original_items=" + itoa(len(arr)) +
+		header := "[codex-relay headroom: compressed tool output; kind=json_array; original_items=" + itoa(len(arr)) +
 			"; kept_items=" + itoa(len(sample)) + "; original_chars=" + itoa(originalChars) + "; sha256=" + hash + "]"
 		return &Compression{Kind: "json_array", Compressed: header + "\n" + indentJSON(sample)}
 	}
@@ -297,7 +297,7 @@ func tryCompressJsonText(text string, maxItems int, hash string) *Compression {
 			if tableChanged {
 				kind = "json_object_tables"
 			}
-			header := "[ai-gateway headroom: compressed tool output; kind=" + kind + "; original_chars=" + itoa(originalChars) + "; sha256=" + hash + "]"
+			header := "[codex-relay headroom: compressed tool output; kind=" + kind + "; original_chars=" + itoa(originalChars) + "; sha256=" + hash + "]"
 			return &Compression{Kind: kind, Compressed: header + "\n" + indentJSON(out)}
 		}
 	}

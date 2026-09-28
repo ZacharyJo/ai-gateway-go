@@ -25,7 +25,7 @@ const BinaryName = "proxy"
 
 // Version 是版本号；发布时可用 ldflags 覆盖：
 //
-//	go build -ldflags "-X ai-gateway-go/internal/proxy.Version=v1.2.3"
+//	go build -ldflags "-X codex-relay/internal/proxy.Version=v1.2.3"
 var Version = "0.1.0"
 
 // Author / AuthorEmail 是项目作者信息（--version 展示用）。
@@ -216,7 +216,7 @@ func printProxyUsage(w io.Writer, cfg *Config) {
 
 子命令
     （无）    前台运行（Ctrl-C 停止）
-    start     后台守护启动（脱离终端 + log/ai-gateway.pid + 就绪校验；端口被占会报失败）
+    start     后台守护启动（脱离终端 + log/codex-relay.pid + 就绪校验；端口被占会报失败）
     stop      停止（SIGTERM 优雅退出，超时再 SIGKILL）
     restart   重启
     status    查看 PID + /healthz
@@ -242,7 +242,7 @@ func printProxyUsage(w io.Writer, cfg *Config) {
             GET /headroom-lite/<sha256>  取回压缩前原文
             其他                   转发上游
 
-配置来源    ~/.ai-gateway/config.toml 的 [proxy] 段；环境变量覆盖之
+配置来源    ~/.codex-relay/config.toml 的 [proxy] 段；环境变量覆盖之
            （PORT / UPSTREAM_BASE / HEADROOM_LITE_MODE / DIAGNOSTIC_LOGGING 等）
 `,
 		BinaryName,
@@ -259,7 +259,7 @@ func printProxyUsage(w io.Writer, cfg *Config) {
 
 // printVersion 打印版本信息。
 func printVersion(w io.Writer) {
-	fmt.Fprintf(w, "%s v%s (ai-gateway-go)\n", BinaryName, Version)
+	fmt.Fprintf(w, "%s v%s (codex-relay)\n", BinaryName, Version)
 	fmt.Fprintf(w, "Author: %s <%s>\n", Author, AuthorEmail)
 	fmt.Fprintf(w, "License: MIT\n")
 	fmt.Fprintf(w, "Go: %s\n", runtime.Version())
@@ -279,7 +279,7 @@ func sortedStatuses(m map[int]bool) []int {
 func loadConfigChecked() (*Config, error) {
 	cfg := LoadConfig()
 	if cfg.UpstreamBase == "" {
-		return nil, fmt.Errorf("UPSTREAM_BASE 未配置：请在环境变量或 ~/.ai-gateway/config.toml 的 [proxy] 段设置上游地址")
+		return nil, fmt.Errorf("UPSTREAM_BASE 未配置：请在环境变量或 ~/.codex-relay/config.toml 的 [proxy] 段设置上游地址")
 	}
 	return cfg, nil
 }
@@ -346,10 +346,10 @@ func Main() int {
 		logOut = io.Discard
 	}
 	log := NewLogger(logOut, cfg.DiagnosticLogging)
-	// 日志轮转：LOG_DIR/ai-gateway.log，默认开启
+	// 日志轮转：LOG_DIR/codex-relay.log，默认开启
 	var rot *RotatingWriter
 	if cfg.LogRotationEnabled {
-		if w, err := NewRotatingWriter(filepath.Join(cfg.LogDir, "ai-gateway.log"),
+		if w, err := NewRotatingWriter(filepath.Join(cfg.LogDir, "codex-relay.log"),
 			cfg.LogRotationMaxBytes, cfg.LogRotationKeep,
 			time.Duration(cfg.LogRotationIntervalMs)*time.Millisecond); err == nil {
 			rot = w

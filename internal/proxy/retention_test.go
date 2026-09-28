@@ -94,7 +94,7 @@ func TestIdleTimeoutReaderCloseStopsTimer(t *testing.T) {
 func TestRetentionSweepRemovesExpired(t *testing.T) {
 	logDir := t.TempDir()
 	storeDir := filepath.Join(logDir, "headroom-lite-store")
-	capDir := filepath.Join(logDir, "ai-gateway-captures")
+	capDir := filepath.Join(logDir, "codex-relay-captures")
 	for _, d := range []string{storeDir, capDir} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			t.Fatal(err)

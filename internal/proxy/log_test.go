@@ -9,7 +9,7 @@ import (
 )
 
 func TestLoggerFileOutput(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "ai-gateway.log")
+	path := filepath.Join(t.TempDir(), "codex-relay.log")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -28,7 +28,7 @@ func TestLoggerFileOutput(t *testing.T) {
 }
 
 func TestRotatingWriter(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "ai-gateway.log")
+	path := filepath.Join(t.TempDir(), "codex-relay.log")
 	w, err := NewRotatingWriter(path, 100, 3, 10*time.Millisecond)
 	if err != nil {
 		t.Fatalf("NewRotatingWriter: %v", err)
@@ -64,7 +64,7 @@ func TestRotatingWriter(t *testing.T) {
 }
 
 func TestRotatingWriterKeep(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "ai-gateway.log")
+	path := filepath.Join(t.TempDir(), "codex-relay.log")
 	w, err := NewRotatingWriter(path, 50, 2, 5*time.Millisecond)
 	if err != nil {
 		t.Fatalf("NewRotatingWriter: %v", err)

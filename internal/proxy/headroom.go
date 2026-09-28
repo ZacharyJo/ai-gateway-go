@@ -103,7 +103,7 @@ func (h *Headroom) compressLargeText(text string) *Compression {
 	if isGitDiff(lines) {
 		diff := compressGitDiff(lines, h.cfg.KeepLineContext)
 		base.Kind = "git_diff"
-		header := "[ai-gateway headroom: compressed tool output; kind=git_diff; original_lines=" + itoa(len(lines)) +
+		header := "[codex-relay headroom: compressed tool output; kind=git_diff; original_lines=" + itoa(len(lines)) +
 			"; kept_lines=" + itoa(diff.keptLines) + "; files=" + itoa(diff.files) + "; hunks=" + itoa(diff.hunks) +
 			"; additions=" + itoa(diff.additions) + "; deletions=" + itoa(diff.deletions) +
 			"; omitted_context_lines=" + itoa(diff.omittedContext) + "; original_chars=" + itoa(chars) + "; sha256=" + hash + "]"
@@ -118,7 +118,7 @@ func (h *Headroom) compressLargeText(text string) *Compression {
 		for _, v := range selected {
 			kept += len(v)
 		}
-		header := "[ai-gateway headroom: compressed tool output; kind=search_results; original_matches=" + itoa(parsed) +
+		header := "[codex-relay headroom: compressed tool output; kind=search_results; original_matches=" + itoa(parsed) +
 			"; kept_matches=" + itoa(kept) + "; files=" + itoa(len(files)) + "; original_chars=" + itoa(chars) + "; sha256=" + hash + "]"
 		base.Compressed = header + "\n" + formatSearchResults(files, selected)
 		return base
@@ -127,7 +127,7 @@ func (h *Headroom) compressLargeText(text string) *Compression {
 		sel := uniqueLines(selectLogLines(lines, h.cfg.KeepLineContext, h.cfg.MaxSnippets),
 			max(20, h.cfg.MaxSnippets*(h.cfg.KeepLineContext*2+1)))
 		base.Kind = "log_or_multiline"
-		header := "[ai-gateway headroom: compressed tool output; kind=log_or_multiline; original_lines=" + itoa(len(lines)) +
+		header := "[codex-relay headroom: compressed tool output; kind=log_or_multiline; original_lines=" + itoa(len(lines)) +
 			"; kept_lines=" + itoa(len(sel)) + "; original_chars=" + itoa(chars) + "; sha256=" + hash + "]"
 		parts := []string{header, "--- head ---", sliceChars(text, h.cfg.HeadChars)}
 		if len(sel) > 0 {
@@ -137,7 +137,7 @@ func (h *Headroom) compressLargeText(text string) *Compression {
 		base.Compressed = strings.Join(parts, "\n")
 		return base
 	}
-	base.Compressed = "[ai-gateway headroom: compressed tool output; kind=text; original_chars=" + itoa(chars) +
+	base.Compressed = "[codex-relay headroom: compressed tool output; kind=text; original_chars=" + itoa(chars) +
 		"; sha256=" + hash + "]\n--- head ---\n" + sliceChars(text, h.cfg.HeadChars) +
 		"\n--- tail ---\n" + tailChars(text, h.cfg.TailChars)
 	return base
