@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// raw 字节保真改写器（对应 ai-gateway headroom/raw_rewriter.mjs）。
+// raw 字节保真改写器（对应原始 JS 实现 headroom/raw_rewriter.mjs）。
 // 在原始请求字节里精确定位 $.input[i].output 字符串字面量区间，做非重叠替换，
 // 保证其余字节（缩进、encrypted_content、键序）逐字节不变，最大化上游 prompt cache 命中。
 // 任何一处定位失败 → 返回 nil，调用方回退整体重新序列化。

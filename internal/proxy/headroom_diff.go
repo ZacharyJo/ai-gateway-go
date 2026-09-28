@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// git diff 压缩（对应 ai-gateway headroom/diff_compressor.mjs）。
+// git diff 压缩（对应原始 JS 实现 headroom/diff_compressor.mjs）。
 
 var reGitDiffHeader = regexp.MustCompile(`^(diff --git|diff --combined |diff --cc |--- a\/|\+\+\+ b\/|@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@|@@@+\s+-\d+)`)
 var reGitHunkStart = regexp.MustCompile(`^@@@?\s`)

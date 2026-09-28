@@ -5,7 +5,7 @@ import (
 	"sort"
 )
 
-// 压缩判定与统计（对应 ai-gateway headroom/stats.mjs）。
+// 压缩判定与统计（对应原始 JS 实现 headroom/stats.mjs）。
 
 // Compression 是一次压缩的产物（对应 JS 里压缩函数返回的对象）。
 type Compression struct {

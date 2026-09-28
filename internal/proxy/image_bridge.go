@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-// bridge_imagegen 工具桥接（对齐 ai-gateway 的 bridge_imagegen 思路）。
+// bridge_imagegen 工具桥接（对齐原始 JS 实现的 bridge_imagegen 思路）。
 // 默认关（BRIDGE_IMAGEGEN_ENABLED）：开启后向透传（GPT 系）请求注入 bridge_imagegen
 // 工具与指令，模型调用它时代理转调上游图片 API（/images/generations 或 /images/edits），
 // 把生成的图片保存到本地并把结果写回响应，替代 Codex 原生 image_generation 工具——

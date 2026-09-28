@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// 工具形状修理（对应 ai-gateway 的 tool_shape）：
+// 工具形状修理（对应原始 JS 实现的 tool_shape）：
 // 修复把客户端声明的 `custom`（freeform）工具降级成普通 function_call 的上游响应。
 //
 // 背景：Codex 把 exec / apply_patch 声明为 { type: "custom" } 工具，只有模型回

@@ -2,7 +2,7 @@ package proxy
 
 import "regexp"
 
-// tokenPattern 对应 ai-gateway headroom/token_estimator.mjs 的正则，必须一比一复刻：
+// tokenPattern 对应原始 JS 实现 headroom/token_estimator.mjs 的正则，必须一比一复刻：
 // 单个中文字符 / 连续字母 / 连续数字 / 单个其他非空白字符。
 //
 // 空白类必须显式列全 JS `\s` 的成员：Go 的 `\s` 只有 ASCII 的 [\t\n\f\r ]，
