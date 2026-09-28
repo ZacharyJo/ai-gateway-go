@@ -2,6 +2,20 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)；main 合入使用 squash，每个 PR 对应一条记录。
 
+## [v0.3.3] - 2026-09-28
+
+### Fixed
+
+- **原生 Anthropic 透传不再被误判为空流截断**：`tracker.feed` 此前被 `doneNet` 门控，导致 `/messages` 原生透传（`doneNet=false`）每轮 `sawData` 恒为假、被判成空流截断（503）。改为无条件喂 tracker；只有写 `[DONE]` 的收尾仍受 `doneNet` 门控（Anthropic 不认 `[DONE]`）。
+
+### Changed
+
+- **透传路径补协议层截断判定**：干净 EOF 不再等于成功——上游没发终止事件（Responses 的 `response.completed`/`incomplete`/`failed`，或原生 Anthropic 的 `message_stop`）时按截断上报、`request_finish` 记 503，与适配路径同口径。新增 `terminalEventSniffer`（按协议选终止标志串，滑窗检测跨 chunk 切分）。
+
+### Docs
+
+- 澄清 `stream_limits.go` 两处语义：指纹重放冷却只是"不主动诱导"、**并不能真正阻止** codex 重试（未知错误码走 `ApiError::Retryable`，且"流没 `response.completed`"同样触发重试）；`overloadedErrorFrame` 的 `code` codex 并不认识、会忽略，客户端重试的真实原因是这一轮始终没有 `response.completed`。
+
 ## [v0.3.2] - 2026-09-28
 
 ### Fixed
