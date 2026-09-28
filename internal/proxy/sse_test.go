@@ -450,3 +450,32 @@ func TestStreamSSEChatKeepaliveDuringThink(t *testing.T) {
 		t.Errorf("流应在无 finish_reason 时以 incomplete 收尾:\n%s", out)
 	}
 }
+
+// zeroNilForeverReader 永远返回 (0,nil)：验证预检不会忙旋挂死。
+type zeroNilForeverReader struct{ reads int }
+
+func (r *zeroNilForeverReader) Read(p []byte) (int, error) {
+	r.reads++
+	return 0, nil
+}
+
+func TestPrimeSSEEventBoundedOnZeroNilReads(t *testing.T) {
+	r := &zeroNilForeverReader{}
+	data, complete, buffered, err := primeSSEEvent(r, 1024)
+	if complete || data != "" || len(buffered) != 0 || err != nil {
+		t.Errorf("primeSSEEvent = (%q,%v,%d bytes,%v), want fail-open empty", data, complete, len(buffered), err)
+	}
+	if r.reads > primeMaxEmptyReads+1 {
+		t.Errorf("read %d times, want bounded by %d（否则忙旋挂死）", r.reads, primeMaxEmptyReads)
+	}
+}
+
+func TestIsFailureSSEDataNullErrorIsNotFailure(t *testing.T) {
+	// 网关常在每个 chunk 回显 "error":null：不能判为失败终态。
+	if isFailureSSEData(`{"choices":[{"delta":{"content":"hi"}}],"error":null}`) {
+		t.Error(`"error":null 不应判为失败终态`)
+	}
+	if !isFailureSSEData(`{"error":{"message":"boom"}}`) {
+		t.Error("非 nil error 应判为失败终态")
+	}
+}

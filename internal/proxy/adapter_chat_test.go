@@ -298,3 +298,52 @@ func TestApplyChatToolChoiceEnums(t *testing.T) {
 		t.Errorf("named tool = %v, want Chat function object", out["tool_choice"])
 	}
 }
+
+func TestChatSSETransformerNullErrorNotFatal(t *testing.T) {
+	// 网关常在每个 chunk 回显 "error":null：不能判为流失败。
+	tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+	out := tr.Push(`{"id":"c","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}],"error":null}`) + tr.Flush()
+	if strings.Contains(out, "response.failed") {
+		t.Errorf(`"error":null 不应判失败:\n%s`, out)
+	}
+	if !strings.Contains(out, "response.completed") {
+		t.Errorf("正常流应收尾 completed:\n%s", out)
+	}
+}
+
+func TestChatSSETransformerWhitespaceThenRealName(t *testing.T) {
+	// 首帧 name 为纯空白、后续帧才给真实 name：应更新为真实 name，不得永久判丢弃。
+	tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+	out := tr.Push(`{"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"   "}}]}}]}`)
+	out += tr.Push(`{"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"bash","arguments":"{}"}}]},"finish_reason":"stop"}]}`)
+	out += tr.Flush()
+	if strings.Contains(out, "upstream_tool_call_dropped") {
+		t.Errorf("空白占位后到达真实 name 不应判丢弃:\n%s", out)
+	}
+	if !strings.Contains(out, "function_call_arguments.done") {
+		t.Errorf("合法工具调用应正常收尾:\n%s", out)
+	}
+}
+
+func TestChatSSETransformerTruncatedDroppedToolClassified(t *testing.T) {
+	// 无 name 的工具调用 + 无 finish_reason 截断：应报 upstream_tool_call_dropped
+	// （与 Messages 路径同口径），而非 stream_truncated。
+	tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+	out := tr.Push(`{"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"bad"}]}}]}`) + tr.Flush()
+	if !strings.Contains(out, "upstream_tool_call_dropped") {
+		t.Errorf("截断+丢弃工具应报 upstream_tool_call_dropped:\n%s", out)
+	}
+	if strings.Contains(out, "stream_truncated") {
+		t.Errorf("不应报 stream_truncated:\n%s", out)
+	}
+}
+
+func TestChatSSETransformerTerminalFailed(t *testing.T) {
+	// 丢弃工具回合应报告 TerminalFailed=true，供监控记非 200（否则客户端看到 failed、日志记 200）。
+	tr := newChatSSETransformer("deepseek-v4-flash", 1, nil)
+	tr.Push(`{"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"bad"}]},"finish_reason":"stop"}]}`)
+	tr.Flush()
+	if !tr.TerminalFailed() {
+		t.Error("丢弃工具回合应报告 TerminalFailed=true")
+	}
+}

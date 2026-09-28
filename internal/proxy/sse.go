@@ -23,6 +23,11 @@ func isSSE(resp *http.Response) bool {
 	return strings.Contains(strings.ToLower(ct), "text/event-stream")
 }
 
+// primeMaxEmptyReads 是预检阶段连续空读（Read 返回 (0,nil)）的次数上限。
+// (0,nil) 本身合法，但病理 reader（包装的 idle-timeout / gzip / MultiReader）可能
+// 反复空读而不阻塞——超过上限即 fail-open 交回正常交付，避免首包预检忙旋挂死请求。
+const primeMaxEmptyReads = 100
+
 // primeSSEEvent 读取上游 SSE 流的第一个完整事件（data 内容），用于交付前预检。
 // 返回 (首帧 data、是否已读到完整事件、已读原始字节、error)。
 // 只有“已读到完整事件”才算预检通过；上游迟迟不吐数据、或流在首个完整事件前结束，
@@ -32,9 +37,11 @@ func primeSSEEvent(r io.Reader, maxBytes int) (data string, complete bool, buffe
 	buf := make([]byte, 32*1024)
 	var pending []byte
 	var sawEOF bool
+	emptyReads := 0
 	for len(pending) < maxBytes {
 		n, readErr := r.Read(buf)
 		if n > 0 {
+			emptyReads = 0
 			pending = append(pending, buf[:n]...)
 			if end := lastSSEBoundary(string(pending)); end > 0 {
 				first := pending[:end]
@@ -42,6 +49,12 @@ func primeSSEEvent(r io.Reader, maxBytes int) (data string, complete bool, buffe
 				if len(frames) > 0 {
 					return frames[0].data, true, pending, nil
 				}
+			}
+		} else if readErr == nil {
+			// (0,nil) 空读：计数达到上限即 fail-open，交回正常交付（不重试、不挂死）。
+			emptyReads++
+			if emptyReads >= primeMaxEmptyReads {
+				return "", false, pending, nil
 			}
 		}
 		if readErr != nil {
@@ -72,7 +85,9 @@ func isFailureSSEData(data string) bool {
 	if json.Unmarshal([]byte(trimmed), &doc) != nil {
 		return false
 	}
-	if _, has := doc["error"]; has {
+	// 只认「非 nil 的 error」为失败：部分网关每个 chunk 都回显 "error":null，
+	// 按键存在判定会把健康首帧误判成失败终态。
+	if errVal, has := doc["error"]; has && errVal != nil {
 		return true
 	}
 	if t := stringifyAny(doc["type"]); t == "response.failed" || t == "response.incomplete" {
@@ -105,6 +120,36 @@ func protocolIncomplete(t sseEventTransformer) bool {
 	return false
 }
 
+// terminalFailureReporter 由能判断"本轮已下发失败终态"的转换器实现。
+// 这类轮次协议上正常终止（收到 message_stop / finish_reason），但代理合成了
+// response.failed（如 upstream_tool_call_dropped / stream_truncated）——客户端看到失败，
+// 监控不应记成 200 成功。
+type terminalFailureReporter interface {
+	TerminalFailed() bool
+}
+
+// terminalFailed 在转换器能判定时返回"本轮是否已下发失败终态"，否则 false。
+func terminalFailed(t sseEventTransformer) bool {
+	if r, ok := t.(terminalFailureReporter); ok {
+		return r.TerminalFailed()
+	}
+	return false
+}
+
+// thinkingBufferReporter 由会缓冲未闭合 think 块（对下游零输出）的转换器实现。
+// 流循环据此在缓冲期发保活注释帧，防客户端把长思考误判为断流。
+type thinkingBufferReporter interface {
+	BufferingThink() bool
+}
+
+// bufferingThink 在转换器能判定时返回"当前是否处于 think 缓冲期"，否则 false。
+func bufferingThink(t sseEventTransformer) bool {
+	if r, ok := t.(thinkingBufferReporter); ok {
+		return r.BufferingThink()
+	}
+	return false
+}
+
 // chainedSSETransformer 顺序组合两个变换器：第二个消费第一个的输出。
 // 适配路径开 bridge 桥接时用：MessagesSSETransformer 先转 Responses，再喂给
 // imageBridgeSSETransformer 执行 bridge_imagegen。
@@ -126,6 +171,12 @@ func (c *chainedSSETransformer) Flush() string {
 
 // ProtocolIncomplete 委托链首（Messages 转换器）：链尾的图片桥接不关心协议终止事件。
 func (c *chainedSSETransformer) ProtocolIncomplete() bool { return protocolIncomplete(c.first) }
+
+// TerminalFailed 委托链首（Messages 转换器）：链尾的图片桥接不产生失败终态。
+func (c *chainedSSETransformer) TerminalFailed() bool { return terminalFailed(c.first) }
+
+// BufferingThink 委托链首（Messages 转换器）：链尾的图片桥接不缓冲 think。
+func (c *chainedSSETransformer) BufferingThink() bool { return bufferingThink(c.first) }
 
 // streamSSEUsage 把上游 SSE 逐块写回客户端并刷新（保证首字低延迟），同时嗅探
 // GPT 透传流里的 usage（response.completed 帧）。
@@ -214,17 +265,25 @@ func streamSSEAdapted(w http.ResponseWriter, body io.Reader, t sseEventTransform
 	buf := make([]byte, 32*1024)
 	tracker := newSSEDoneTracker()
 	detector := &streamErrorDetector{}
+	// 保活注释帧可能与内容帧并发写回：写入经 wMu 串行化。
+	var wMu sync.Mutex
 	write := func(s string) bool {
 		if s == "" {
 			return true
 		}
-		if _, err := w.Write([]byte(s)); err != nil {
-			return false
+		wMu.Lock()
+		_, err := w.Write([]byte(s))
+		if err == nil {
+			tracker.feed([]byte(s))
+			rc.Flush()
 		}
-		tracker.feed([]byte(s))
-		rc.Flush()
-		return true
+		wMu.Unlock()
+		return err == nil
 	}
+	// 长思考静默防护：Messages 路径同样会缓冲未闭合 <thinking>（对下游零输出），
+	// 期间以 SSE 注释帧保活，防客户端空闲超时断连。thinking 由主循环置位、goroutine 原子读。
+	var thinking atomic.Bool
+	defer sseKeepalive(w, rc, &wMu, &thinking)()
 	var readErr error
 	for {
 		n, err := body.Read(buf)
@@ -235,8 +294,7 @@ func streamSSEAdapted(w http.ResponseWriter, body io.Reader, t sseEventTransform
 			// 后续的 server_overloaded 帧永远到不了客户端。
 			if k != "" {
 				if !isTerminalStreamErrorKind(k) {
-					_, _ = w.Write([]byte(overloadedErrorFrame))
-					rc.Flush()
+					write(overloadedErrorFrame)
 				}
 				write(t.Push(string(buf[:n])))
 				return k, false
@@ -244,6 +302,7 @@ func streamSSEAdapted(w http.ResponseWriter, body io.Reader, t sseEventTransform
 			if !write(t.Push(string(buf[:n]))) {
 				return "", true // 客户端断开：算截断（监控非成功）
 			}
+			thinking.Store(bufferingThink(t))
 		}
 		if err != nil {
 			readErr = err
@@ -262,8 +321,9 @@ func streamSSEAdapted(w http.ResponseWriter, body io.Reader, t sseEventTransform
 		return "", true
 	}
 	// 截断判定：TCP 层读错误（RST/空闲超时）之外，上游没发协议终止事件（message_stop）
-	// 同样算截断——干净 EOF 只是 HTTP 响应正常终止，不代表这一轮正常收尾。
-	return "", !isCleanStreamEnd(readErr) || protocolIncomplete(t)
+	// 同样算截断——干净 EOF 只是 HTTP 响应正常终止，不代表这一轮正常收尾。已下发失败终态
+	// （如 upstream_tool_call_dropped）的轮次同样不算成功。
+	return "", !isCleanStreamEnd(readErr) || protocolIncomplete(t) || terminalFailed(t)
 }
 
 // chatErrorFrame 从 Chat 错误 chunk 的 data 行里抽出 error 对象，包成 Responses 的
@@ -320,40 +380,10 @@ func streamSSEChatChained(w http.ResponseWriter, body io.Reader, t *ChatSSETrans
 		wMu.Unlock()
 		return err == nil
 	}
-	// 长思考静默防护：内嵌 <thinking> 缓冲期转换器对 codex 零输出，客户端若按流空闲计时
-	// 会把长思考误判为断流。期间以 SSE 注释帧（协议忽略，仅保活）维持数据流。
-	// thinking 由主循环在每个 chunk 处理后置位，keepalive goroutine 只原子读，不碰转换器。
+	// 长思考静默防护：内嵌 <thinking> 缓冲期转换器对下游零输出，客户端若按流空闲计时
+	// 会把长思考误判为断流。期间以 SSE 注释帧保活；thinking 由主循环置位、goroutine 原子读。
 	var thinking atomic.Bool
-	stopKeepalive := make(chan struct{})
-	keepaliveDone := make(chan struct{})
-	go func() {
-		defer close(keepaliveDone)
-		ticker := time.NewTicker(keepaliveInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stopKeepalive:
-				return
-			case <-ticker.C:
-				if !thinking.Load() {
-					continue
-				}
-				wMu.Lock()
-				_, err := w.Write([]byte(keepaliveFrame))
-				if err == nil {
-					rc.Flush()
-				}
-				wMu.Unlock()
-				if err != nil {
-					return // 客户端已断开：停止保活
-				}
-			}
-		}
-	}()
-	defer func() {
-		close(stopKeepalive)
-		<-keepaliveDone // 主循环返回前确保 goroutine 退出，避免对已归还的连接写残留字节
-	}()
+	defer sseKeepalive(w, rc, &wMu, &thinking)()
 
 	pending := ""
 	var readErr error
@@ -430,8 +460,9 @@ func streamSSEChatChained(w http.ResponseWriter, body io.Reader, t *ChatSSETrans
 		write(t.Flush())
 	}
 	// 截断判定：TCP 层读错误之外，上游没发 finish_reason 同样算截断——干净 EOF 只是
-	// HTTP 响应正常终止，不代表这一轮正常收尾。
-	return "", !isCleanStreamEnd(readErr) || t.ProtocolIncomplete()
+	// HTTP 响应正常终止，不代表这一轮正常收尾。已下发失败终态（如 upstream_tool_call_dropped）
+	// 的轮次同样不算成功。
+	return "", !isCleanStreamEnd(readErr) || t.ProtocolIncomplete() || t.TerminalFailed()
 }
 
 // keepaliveInterval 是长思考静默期的保活注释帧间隔：远小于常见流空闲超时（60s+），
@@ -440,6 +471,43 @@ var keepaliveInterval = 15 * time.Second
 
 // keepaliveFrame 是 SSE 注释帧（冒号开头，协议忽略），只用于维持连接活跃、防静默超时断连。
 const keepaliveFrame = ": keepalive\n\n"
+
+// sseKeepalive 在 think 缓冲期（转换器对下游零输出）以 SSE 注释帧保活，防客户端把长思考
+// 误判为断流。thinking 由主循环置位、goroutine 只原子读；写入经 wMu 与内容帧串行化。
+// 返回的 stop 函数须 defer 调用：它在主循环返回前停掉 goroutine 并等其退出，
+// 避免对已归还的连接写残留字节。
+func sseKeepalive(w http.ResponseWriter, rc *http.ResponseController, wMu *sync.Mutex, thinking *atomic.Bool) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(keepaliveInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				if !thinking.Load() {
+					continue
+				}
+				wMu.Lock()
+				_, err := w.Write([]byte(keepaliveFrame))
+				if err == nil {
+					rc.Flush()
+				}
+				wMu.Unlock()
+				if err != nil {
+					return // 客户端已断开：停止保活
+				}
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
+}
 
 // isCleanStreamEnd 判断上游流是否**干净结束**（读到 EOF）。
 // 空闲超时取消 context、连接被 RST 等都会返回非 EOF 错误，属于截断。
