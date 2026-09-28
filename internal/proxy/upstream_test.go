@@ -249,8 +249,10 @@ func TestForwardSSEAppendsDone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Forward: %v", err)
 	}
-	if res.Status != http.StatusOK {
-		t.Errorf("Status = %d, want 200", res.Status)
+	// 上游没发任何终止事件就干净结束：这是截断——客户端拿不到 response.completed 会自行
+	// 重试，代理不该记 200 成功。
+	if res.Status != http.StatusServiceUnavailable {
+		t.Errorf("Status = %d, want 503（无终止事件按截断上报）", res.Status)
 	}
 	if !strings.HasSuffix(rr.Body.String(), "data: [DONE]\n\n") {
 		t.Errorf("SSE body missing [DONE] fallback: %q", rr.Body.String())

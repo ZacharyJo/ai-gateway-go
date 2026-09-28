@@ -195,6 +195,13 @@ func streamSSEUsage(w http.ResponseWriter, body io.Reader, doneNet bool, transfo
 	tracker := newSSEDoneTracker()
 	detector := &streamErrorDetector{}
 	sniff := &responsesUsageSniffer{}
+	// 协议层截断判定用的终止事件标志串，按上游协议选：OpenAI 风格看 response.* 终态，
+	// 原生 Anthropic /messages 看 message_stop。
+	terminalMarkers := responsesTerminalMarkers
+	if !doneNet {
+		terminalMarkers = anthropicTerminalMarkers
+	}
+	term := newTerminalEventSniffer(terminalMarkers)
 	var readErr error
 	for {
 		n, err := body.Read(buf)
@@ -209,10 +216,12 @@ func streamSSEUsage(w http.ResponseWriter, body io.Reader, doneNet bool, transfo
 					// 客户端中途断开：算截断（监控记非成功）
 					return "", true, sniff.in, sniff.out
 				}
-				if doneNet {
-					tracker.feed(chunk)
-				}
+				// 无条件喂 tracker：sawData 决定"空流"判定，原生 Anthropic 透传（doneNet=false）
+				// 同样需要它，否则每一轮都会被误判成空流截断（503）。只有写 [DONE] 的 finish
+				// 才受 doneNet 门控——Anthropic 不认 [DONE]。
+				tracker.feed(chunk)
 				sniff.feed(chunk)
+				term.feed(chunk)
 				rc.Flush()
 				if k := detector.feed(chunk); k != "" {
 					// 终态错误（如指纹重放冷却）不发 server_overloaded，避免诱导客户端重试撞冷却；
@@ -236,6 +245,7 @@ func streamSSEUsage(w http.ResponseWriter, body io.Reader, doneNet bool, transfo
 			_, _ = w.Write([]byte(rest))
 			tracker.feed([]byte(rest))
 			sniff.feed([]byte(rest))
+			term.feed([]byte(rest))
 			rc.Flush()
 		}
 	}
@@ -254,7 +264,10 @@ func streamSSEUsage(w http.ResponseWriter, body io.Reader, doneNet bool, transfo
 		}
 		return "", true, sniff.in, sniff.out
 	}
-	return "", !clean, sniff.in, sniff.out
+	// 协议层截断判定：干净 EOF 只说明 HTTP 响应正常终止，不代表这一轮正常收尾。上游一个终止
+	// 事件都没发（Responses 的 response.completed 等 / Anthropic 的 message_stop）时，客户端
+	// 拿不到终止事件会自行重试，代理不该记 200 成功。
+	return "", !clean || !term.seen, sniff.in, sniff.out
 }
 
 // streamSSEAdapted 把上游 Messages SSE 增量转换成 Responses SSE 后逐块写回并刷新。
@@ -578,6 +591,60 @@ const usageSniffWindow = 64 * 1024
 
 // usageMarker 是 Responses 完成帧的标志串，usage 就在其所在 completed 帧里。
 const usageMarker = "response.completed"
+
+// 透传路径的协议终止事件标志串，按上游协议选一组：出现其一即表示上游已正常收尾。
+// 用于把截断判定从 TCP 层扩到协议层——干净 EOF 但没有终止事件，这一轮对客户端仍是不完整的。
+// 与 usageMarker 同一假设：用裸标志串而非严格 JSON 解析，好处是容忍 `"type": "x"` 这类
+// 带空格的写法；JSON 字符串值里的引号会被转义成 \"，所以正文文本里不会出现这些标志串。
+var (
+	// responsesTerminalMarkers：OpenAI 风格 Responses 流（completed / incomplete / failed
+	// 都是终态，只是成败不同）。
+	responsesTerminalMarkers = []string{"response.completed", "response.incomplete", "response.failed"}
+	// anthropicTerminalMarkers：原生 Anthropic /messages 流以 message_stop 收尾。
+	anthropicTerminalMarkers = []string{"message_stop"}
+)
+
+// terminalEventSniffer 检测透传流里是否出现过协议终止事件。
+// 与 responsesUsageSniffer 同样只留「标志串长度-1」的重叠尾部，避免逐 chunk 扫全窗。
+type terminalEventSniffer struct {
+	markers [][]byte
+	maxLen  int
+	carry   []byte
+	seen    bool
+}
+
+func newTerminalEventSniffer(markers []string) *terminalEventSniffer {
+	ms := make([][]byte, 0, len(markers))
+	maxLen := 0
+	for _, m := range markers {
+		ms = append(ms, []byte(m))
+		if len(m) > maxLen {
+			maxLen = len(m)
+		}
+	}
+	return &terminalEventSniffer{markers: ms, maxLen: maxLen}
+}
+
+func (s *terminalEventSniffer) feed(chunk []byte) {
+	if s.seen || s.maxLen == 0 {
+		return
+	}
+	probe := make([]byte, 0, len(s.carry)+len(chunk))
+	probe = append(probe, s.carry...)
+	probe = append(probe, chunk...)
+	for _, m := range s.markers {
+		if bytes.Contains(probe, m) {
+			s.seen = true
+			s.carry = nil
+			return
+		}
+	}
+	keep := s.maxLen - 1
+	if len(probe) > keep {
+		probe = probe[len(probe)-keep:]
+	}
+	s.carry = append(s.carry[:0], probe...)
+}
 
 func (s *responsesUsageSniffer) feed(chunk []byte) {
 	if !s.seen {

@@ -58,12 +58,17 @@ func TestStreamSSENoDoneNetForNativeAnthropic(t *testing.T) {
 	// 原生 Anthropic 流以 message_stop 收尾、不认 [DONE]，doneNet=false 时不能补帧
 	native := "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
 	rr := httptest.NewRecorder()
-	_, _ = streamSSE(rr, strings.NewReader(native), false)
+	_, truncated := streamSSE(rr, strings.NewReader(native), false)
 	if rr.Body.String() != native {
 		t.Errorf("native Anthropic stream was modified:\n got %q\nwant %q", rr.Body.String(), native)
 	}
 	if strings.Contains(rr.Body.String(), "[DONE]") {
 		t.Error("[DONE] injected into native Anthropic stream")
+	}
+	// 回归：tracker.feed 曾被 doneNet 门挡住，导致原生 Anthropic 透传每轮都被判成
+	// 空流截断（503）。有内容且干净结束就不是截断。
+	if truncated {
+		t.Error("原生 Anthropic 透传不应被当成空流截断")
 	}
 }
 
@@ -542,5 +547,37 @@ func TestStreamSSEChatEventsWithoutFinishStillTruncated(t *testing.T) {
 	_, truncated := streamSSEChat(rr, &truncatedReader{data: []byte(chunk), err: io.EOF}, tr)
 	if !truncated {
 		t.Error("发过协议帧但无 finish_reason 应上报截断")
+	}
+}
+
+// TestStreamSSEUsageProtocolTruncation 验证透传路径的协议层截断判定：
+// 干净 EOF 只说明 HTTP 响应正常终止，没发终止事件（response.completed 等）的轮次
+// 客户端会重试，代理不该记 200 成功。
+func TestStreamSSEUsageProtocolTruncation(t *testing.T) {
+	const delta = "data: {\"type\":\"response.output_text.delta\"}\n\n"
+	const completed = "data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+
+	for _, tc := range []struct {
+		name    string
+		body    string
+		doneNet bool
+		want    bool
+	}{
+		{"有终止事件", delta + completed, true, false},
+		{"无终止事件（截断）", delta, true, true},
+		{"失败终态也算收尾", delta + "data: {\"type\":\"response.failed\"}\n\n", true, false},
+		{"未完成终态也算收尾", delta + "data: {\"type\":\"response.incomplete\"}\n\n", true, false},
+		// 原生 Anthropic /messages 透传以 message_stop 收尾、不发 response.* 标志串：
+		// doneNet=false 时按 message_stop 判定。
+		{"原生 Anthropic 有 message_stop", "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", false, false},
+		{"原生 Anthropic 无 message_stop（截断）", delta, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			_, truncated := streamSSE(rr, &truncatedReader{data: []byte(tc.body), err: io.EOF}, tc.doneNet)
+			if truncated != tc.want {
+				t.Errorf("truncated = %v, want %v\n%s", truncated, tc.want, rr.Body.String())
+			}
+		})
 	}
 }

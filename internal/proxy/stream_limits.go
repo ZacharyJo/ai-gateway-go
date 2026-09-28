@@ -24,11 +24,14 @@ var (
 	reServersOverload  = regexp.MustCompile(`(?i)servers?\s+.*overloaded`)
 	reTryAgainLater    = regexp.MustCompile(`(?i)please try again later`)
 	// 终态（不可重试）错误：上游按 Prompt 指纹做防重放，命中后该 prompt 进 ~25min 冷却。
-	// 对它重试是必然失败且会延长冷却，故绝不能转成 server_overloaded 诱导客户端重试。
+	// 对它重试是必然失败且会延长冷却，故不把它转成 server_overloaded（原样透传上游错误）。
+	// 但要注意：这只是"不主动诱导"，**并不能真正阻止客户端重试**——codex 对未知错误码走
+	// ApiError::Retryable，而"流没 response.completed"同样触发 stream 重试。要真正拦住只能发
+	// codex 认的终态码（context_length_exceeded / invalid_prompt 等），语义都不对，故维持现状。
 	reFingerprintCooldown = regexp.MustCompile(`(?i)fingerprint_replay_cooldown|重放冷却`)
 )
 
-// terminalStreamErrorKind 是命中后应当作终态透传（不发 server_overloaded、不诱导客户端重试）的错误类型。
+// terminalStreamErrorKind 是命中后应当作终态透传（不发 server_overloaded、不主动诱导重试）的错误类型。
 const kindFingerprintCooldown = "fingerprint_cooldown"
 
 // isTerminalStreamErrorKind 判断软错误检测出的 kind 是否为终态（不可重试）类型。
@@ -126,8 +129,11 @@ func collectErrorTexts(value any, inErrorCtx bool, out *[]string) {
 	}
 }
 
-// overloadedErrorFrame 是写给下游的错误帧：Codex 认识 server_overloaded 并会按自己的
-// stream_max_retries 重试（流内错误时下发的帧）。
+// overloadedErrorFrame 是写给下游的错误帧，用于把"上游把并发/容量软错误塞进 200 流"告知客户端。
+// 注意：codex 只对 code == "flex_unavailable" 的 error 帧报错（见 codex-api 的
+// parse_flex_unavailable），本帧的 code 它并不认识、会直接忽略。客户端之所以仍会重试，是因为
+// 这一轮流结束时始终没有 response.completed——codex 把它当 stream 错误、按自己的
+// stream_max_retries 重试，正是我们想要的（把重试交给客户端）。改这个 code 前先确认这一点。
 const overloadedErrorFrame = "event: error\n" +
 	`data: {"type":"error","error":{"type":"server_error","code":"server_overloaded","message":"server overloaded"}}` +
 	"\n\n"
