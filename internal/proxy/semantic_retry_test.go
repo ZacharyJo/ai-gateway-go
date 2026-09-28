@@ -106,6 +106,23 @@ func TestSummarizeResponsesSSE(t *testing.T) {
 		t.Error("non-terminal stream should trigger retry")
 	}
 
+	// 非终端截断**且已吐过可执行输出** → 仍判为空转、丢弃重打。
+	// 这是当前口径：!s.terminal 把"截断"也算进来（见函数注释），hasEvents 只挡"初始截断"。
+	// 代价是上游多生成一次；收益是客户端直接拿到完整轮次，不必自己重试。
+	// 注意：harness-wrapper 在这里多一个 !s.actionable 门（不重打、直接交付截断内容），
+	// 两仓库口径不同。改这条分支前先同步两边，并更新本测试与 shouldRetryReasoningOnly 注释。
+	truncatedWithOutput := strings.Join([]string{
+		`data: {"type":"response.output_item.added","item":{"type":"message","id":"msg_2"}}`, ``,
+		`data: {"type":"response.output_text.delta","delta":"partial"}`, ``,
+	}, "\n")
+	s = summarizeResponsesSSE(truncatedWithOutput)
+	if !s.actionable || s.terminal {
+		t.Fatalf("截断轮 summary = %+v, want actionable && !terminal", s)
+	}
+	if !shouldRetryReasoningOnly(s) {
+		t.Error("截断轮（已吐可执行输出）当前口径是重打；行为变了要同步更新本测试与函数注释")
+	}
+
 	// failed 收尾 → terminal，不重打（错误交给客户端）
 	failed := `data: {"type":"response.failed","response":{"error":{"message":"boom"}}}` + "\n\n"
 	s = summarizeResponsesSSE(failed)

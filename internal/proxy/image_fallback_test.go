@@ -98,3 +98,45 @@ func TestRewriteBodyOmitImages(t *testing.T) {
 		t.Error("无图片请求不应触发改写")
 	}
 }
+
+// TestRewriteBodyOmitImagesUsesNormalizedModel 锁定：重新适配必须写回归一后的模型名。
+// originalBody 是 prepareAdapter 改写前的快照，doc["model"] 是客户端原始拼写；首次适配
+// 发给上游的却是归一后的名字（如 claude-opus-5 → "Opus 5"）。不覆盖的话图片降级重试会带
+// 上游不认的拼写，从"挽救一次 400"变成"再吃一个 400/404"。
+func TestRewriteBodyOmitImagesUsesNormalizedModel(t *testing.T) {
+	original := []byte(`{
+		"model": "claude-opus-5",
+		"input": [{
+			"role": "user",
+			"content": [{
+				"type": "input_image",
+				"image_url": "data:image/png;base64,iVBORw0KGgo="
+			}]
+		}]
+	}`)
+	adapt := &adapterContext{model: "claude-opus-5", normalizedModel: "Opus 5", upstreamPath: "/messages"}
+
+	rewritten, ok := rewriteBodyOmitImages(original, adapt)
+	if !ok {
+		t.Fatal("含图片的请求应该被改写")
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(rewritten, &doc); err != nil {
+		t.Fatalf("改写结果不是合法 JSON: %v", err)
+	}
+	if got := stringifyAny(doc["model"]); got != "Opus 5" {
+		t.Errorf("重试 body 的 model = %q, want %q（必须用归一后的名字）", got, "Opus 5")
+	}
+	// normalizedModel 缺失（如手工构造的 adapterContext）时保持原样，不写空串覆盖
+	bare := &adapterContext{model: "glm-5.2", upstreamPath: "/messages"}
+	rewritten, ok = rewriteBodyOmitImages(original, bare)
+	if !ok {
+		t.Fatal("含图片的请求应该被改写")
+	}
+	if err := json.Unmarshal(rewritten, &doc); err != nil {
+		t.Fatalf("改写结果不是合法 JSON: %v", err)
+	}
+	if got := stringifyAny(doc["model"]); got != "claude-opus-5" {
+		t.Errorf("normalizedModel 为空时 model = %q, want 原样保留", got)
+	}
+}

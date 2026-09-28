@@ -789,6 +789,49 @@ func TestForwardImageFallbackOnUnsupportedError(t *testing.T) {
 	}
 }
 
+// TestForwardImageFallbackSendsNormalizedModel 锁定：图片降级重试必须带上游认的模型名。
+// 降级会拿**原始** Responses body（prepareAdapter 改写前的快照）重新适配，那份 body 里
+// doc["model"] 还是客户端原始拼写（claude-opus-5），而首次适配发给上游的是归一后的
+// "Opus 5"。不写回去的话，重试请求会带上游不认的别名，把"挽救一次 400"变成"再吃一个 400"。
+func TestForwardImageFallbackSendsNormalizedModel(t *testing.T) {
+	clearProxyEnv(t)
+	var attempts atomic.Int32
+	var retryModel string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempts.Add(1)
+		if n == 1 {
+			// 第一次：报 image 不支持
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":{"message":"Model do not support image input.","type":"BadRequest","param":"image_url","code":"InvalidParameter"}}`))
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		var doc map[string]any
+		_ = json.Unmarshal(b, &doc)
+		retryModel = stringifyAny(doc["model"])
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	up := newTestUpstream(t, testConfig(upstream.URL))
+	// 走别名表的模型：客户端发 catalog slug，上游要求 "Opus 5"（精确大小写）
+	reqBody := `{"model":"claude-opus-5","input":[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,abc="}]}]}`
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(reqBody))
+	rr := httptest.NewRecorder()
+	if _, err := up.Forward(req.Context(), rr, req, 1); err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("server hits = %d, want 2（一次 400 + 一次降级重试）", attempts.Load())
+	}
+	if retryModel != "Opus 5" {
+		t.Errorf("重试请求 model = %q, want %q（降级重试必须用归一后的名字）", retryModel, "Opus 5")
+	}
+}
+
 func TestForwardImageFallbackNotRetriggered(t *testing.T) {
 	// 阶段 13：每次请求最多触发一次图片降级（imageRetried 防止无限循环）
 	clearProxyEnv(t)

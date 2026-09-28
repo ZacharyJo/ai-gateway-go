@@ -519,11 +519,19 @@ func (u *Upstream) idleTimeout() time.Duration {
 
 // adapterContext 是一次请求的协议适配上下文（nil 表示不适配，走原样透传）。
 type adapterContext struct {
-	model         string
-	upstreamPath  string
-	customTools   map[string]bool // 声明为 freeform（type=custom）的工具名，回程还原 custom_tool_call 用
-	isChatAdapter bool            // true=Chat Completions 适配，false=Messages 适配
-	err           *AdapterError
+	// model 是客户端原始拼写（别名归一前），仅用于日志与回程 Responses 帧里的 model 字段回显。
+	model string
+	// normalizedModel 是别名归一后、真正发给上游的模型名。首次适配写进上游 body 的就是它，
+	// 所以任何**重新适配**（图片降级）都必须用它，否则重试请求会带上游不认的拼写。
+	normalizedModel string
+	upstreamPath    string
+	customTools     map[string]bool // 声明为 freeform（type=custom）的工具名，回程还原 custom_tool_call 用
+	isChatAdapter   bool            // true=Chat Completions 适配，false=Messages 适配
+	// toolNamespaces 是 responses lite 形状展开后的还原表：扁平名 → 原始 {namespace, name}。
+	// 回程据此把上游回来的工具名还原成 codex 认的 {name, namespace}（缺 namespace 时客户端会
+	// 补默认 functions，collaboration.* 之类的工具就解析不到了）。经典形状下为空。
+	toolNamespaces map[string]codexToolIdentity
+	err            *AdapterError
 }
 
 // prepareAdapter 判断是否需要 Responses→Messages 适配；需要时改写 *body 并返回上下文。
@@ -560,6 +568,21 @@ func (u *Upstream) prepareAdapter(r *http.Request, path string, body *[]byte, re
 		}
 		return nil, collectCustomToolNames(doc["tools"])
 	}
+	// responses lite 形状：工具可能不在 tools 字段，而是声明在 input 的 additional_tools 载体里、
+	// 并按 namespace 分组。先展开成扁平名再交给转换器；回程按 toolCtx.restore 还原 {name, namespace}。
+	// 无载体时 rewritten=false，工具列表原样不动（经典形状逐字节不变）。
+	toolNamespaces, toolErr := applyCodexToolContext(doc)
+	if toolErr != nil {
+		adapterErr, ok := toolErr.(*AdapterError)
+		if !ok {
+			adapterErr = newAdapterError("%v", toolErr)
+		}
+		u.log.Warnf("adapter_tool_context_failed req=%d model=%s err=%v", reqID, model, toolErr)
+		return &adapterContext{
+			model: model, normalizedModel: normalizedModel,
+			upstreamPath: class.UpstreamPath, err: adapterErr,
+		}, nil
+	}
 	customTools := collectCustomToolNames(doc["tools"])
 	opts := adapterOptions{SupportsImages: class.SupportsImages}
 	var converted map[string]any
@@ -576,16 +599,28 @@ func (u *Upstream) prepareAdapter(r *http.Request, path string, body *[]byte, re
 			adapterErr = newAdapterError("%v", err)
 		}
 		u.log.Warnf("adapter_request_failed req=%d model=%s err=%v", reqID, model, err)
-		return &adapterContext{model: model, upstreamPath: class.UpstreamPath, err: adapterErr}, nil
+		return &adapterContext{
+			model: model, normalizedModel: normalizedModel,
+			upstreamPath: class.UpstreamPath, err: adapterErr,
+		}, nil
 	}
 	b, merr := json.Marshal(converted)
 	if merr != nil {
-		return &adapterContext{model: model, upstreamPath: class.UpstreamPath, err: newAdapterError("failed to serialize adapted request: %v", merr)}, nil
+		return &adapterContext{
+			model: model, normalizedModel: normalizedModel,
+			upstreamPath: class.UpstreamPath,
+			err:          newAdapterError("failed to serialize adapted request: %v", merr),
+		}, nil
 	}
 	*body = b
 	u.log.Infof("adapter_applied req=%d model=%s images=%v custom_tools=%d -> %s",
 		reqID, model, class.SupportsImages, len(customTools), class.UpstreamPath)
-	return &adapterContext{model: model, upstreamPath: class.UpstreamPath, customTools: customTools, isChatAdapter: class.Kind == "chat_adapter"}, customTools
+	return &adapterContext{
+		model: model, normalizedModel: normalizedModel,
+		upstreamPath: class.UpstreamPath, customTools: customTools,
+		isChatAdapter:  class.Kind == "chat_adapter",
+		toolNamespaces: toolNamespaces,
+	}, customTools
 }
 
 // doAttempt 发送单个上游请求（不重试）。网络错误以 error 返回。
@@ -663,23 +698,31 @@ func (u *Upstream) writeResponse(w http.ResponseWriter, resp *http.Response, cap
 		if adapt != nil && adapt.isChatAdapter {
 			nowMs := time.Now().UnixMilli()
 			ct := newChatSSETransformer(adapt.model, nowMs, adapt.customTools)
+			// 链尾挂名字还原：把展开过的扁平名还原成 codex 认的 {name, namespace}。
+			// 经典形状下 toolNamespaces 为空，restorer 为 nil，调用路径与之前完全一致。
+			restorer := newNamespaceRestore(adapt.toolNamespaces)
 			if u.cfg.BridgeImagegenEnabled {
 				// Chat 先转 Responses，再执行 bridge_imagegen（与非流式/透传路径行为对齐）
 				bt := newImageBridgeSSETransformer(u, r, capture.reqID, nil)
-				k, trunc = streamSSEChatChained(w, resp.Body, ct, bt)
+				k, trunc = streamSSEChatChained(w, resp.Body, ct, chainRestorer(bt, restorer))
+			} else if restorer != nil {
+				k, trunc = streamSSEChatChained(w, resp.Body, ct, restorer)
 			} else {
 				k, trunc = streamSSEChat(w, resp.Body, ct)
 			}
 			usage.set(ct.Usage())
 		} else if adapt != nil {
 			mt := newMessagesSSETransformer(adapt.model, adapt.customTools)
+			var tr sseEventTransformer = mt
 			if u.cfg.BridgeImagegenEnabled {
 				// 适配路径开桥接：Messages 先转 Responses，再执行 bridge_imagegen
 				bt := newImageBridgeSSETransformer(u, r, capture.reqID, nil)
-				k, trunc = streamSSEAdapted(w, resp.Body, &chainedSSETransformer{first: mt, second: bt})
-			} else {
-				k, trunc = streamSSEAdapted(w, resp.Body, mt)
+				tr = &chainedSSETransformer{first: mt, second: bt}
 			}
+			if restorer := newNamespaceRestore(adapt.toolNamespaces); restorer != nil {
+				tr = &chainedSSETransformer{first: tr, second: restorer}
+			}
+			k, trunc = streamSSEAdapted(w, resp.Body, tr)
 			usage.set(mt.Usage())
 		} else {
 			var in, out int64
@@ -700,17 +743,18 @@ func (u *Upstream) writeResponse(w http.ResponseWriter, resp *http.Response, cap
 		var doc map[string]any
 		if err := json.Unmarshal(body, &doc); err == nil {
 			now := time.Now()
+			var converted map[string]any
+			var cerr error
 			if adapt.isChatAdapter {
-				if converted, cerr := chatCompletionToResponsesBody(doc, now.UnixMilli(), now.Unix(), adapt.customTools); cerr == nil {
-					if b, merr := json.Marshal(converted); merr == nil {
-						body = b
-					}
-				}
+				converted, cerr = chatCompletionToResponsesBody(doc, now.UnixMilli(), now.Unix(), adapt.customTools)
 			} else {
-				if converted, cerr := messagesToResponsesBody(doc, now.UnixMilli(), now.Unix(), adapt.customTools); cerr == nil {
-					if b, merr := json.Marshal(converted); merr == nil {
-						body = b
-					}
+				converted, cerr = messagesToResponsesBody(doc, now.UnixMilli(), now.Unix(), adapt.customTools)
+			}
+			if cerr == nil {
+				// 回程还原：展开过的扁平名 → codex 认的 {name, namespace}
+				restoreNamespaceNames(converted, adapt.toolNamespaces)
+				if b, merr := json.Marshal(converted); merr == nil {
+					body = b
 				}
 			}
 		}

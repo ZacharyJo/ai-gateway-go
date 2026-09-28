@@ -164,6 +164,8 @@ func NewModelPolicy(cfg *Config) *ModelPolicy {
 var defaultModelPolicy = NewModelPolicy(nil)
 
 // NormalizeModelName 归一模型名：折叠后再走别名表。
+// 返回值是**发给上游的 wire 拼写**（别名表的值，如 "Opus 5"），必须原样保留大小写与空格；
+// 拿它去查能力表/路由表请改用 lookupKey。
 func (p *ModelPolicy) NormalizeModelName(model string) string {
 	folded := foldModelName(model)
 	if alias, ok := p.aliases[folded]; ok {
@@ -172,9 +174,17 @@ func (p *ModelPolicy) NormalizeModelName(model string) string {
 	return folded
 }
 
+// lookupKey 返回能力表/路由表的查找键。
+// 表键统一由 foldModelName 生成（小写 + 空白折叠），而别名表的值是上游 wire 拼写、
+// 未必是折叠形态（如 "Opus 5"），所以查表必须再折叠一次——否则别名命中后查表落空，
+// 图片能力会静默走 fail-open、/responses 原生路由会误判成 Messages 适配。
+func (p *ModelPolicy) lookupKey(model string) string {
+	return foldModelName(p.NormalizeModelName(model))
+}
+
 // SupportsImageInput 返回模型是否支持图片输入。未知模型 fail-open（按支持处理）。
 func (p *ModelPolicy) SupportsImageInput(model string) bool {
-	supported, known := p.capabilities[p.NormalizeModelName(model)]
+	supported, known := p.capabilities[p.lookupKey(model)]
 	return !known || supported
 }
 
@@ -239,7 +249,7 @@ func (p *ModelPolicy) Classify(model string) *ModelClass {
 		return &ModelClass{Kind: "gpt_passthrough", Reason: "gpt_model"}
 	}
 	// 非 GPT：responsesNative 表路由
-	if p.responsesNative[p.NormalizeModelName(model)] {
+	if p.responsesNative[p.lookupKey(model)] {
 		return &ModelClass{Kind: "responses_passthrough", Reason: "responses_native_model"}
 	}
 	return &ModelClass{

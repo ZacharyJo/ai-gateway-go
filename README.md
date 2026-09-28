@@ -129,6 +129,12 @@ export ANTHROPIC_BASE_URL="http://127.0.0.1:8787/v1"
 
 `model/model-catalog-relay.json` is the model list for codex (point `~/.codex/config.toml`'s `model_catalog_json` at it); it only contains models actually supported by third-party upstreams.
 
+Three fields are pinned deliberately — don't drop them when editing the file:
+
+- `tool_mode: "direct"` — codex uses plain structured tool calls. The client's `code_mode` / `code_mode_only` features both default to off, so this only makes the current behavior explicit; without it, a future client default would silently route adapted (non-GPT) models through Code Mode's freeform `exec` tool, which third-party models handle far less reliably.
+- `use_responses_lite: false` — keeps the tool definitions in the request's `tools` field. With `true`, the client sends them as an `additional_tools` item inside `input` instead, which the Messages/Chat adapter does not read, so no tools would reach the upstream at all.
+- `shell_type: "unified_exec"` — canonical spelling; `shell_command` (and `default` / `local`) are legacy aliases the client maps to the same value.
+
 ## License
 
 [MIT](LICENSE)
