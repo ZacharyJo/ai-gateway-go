@@ -2,6 +2,24 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)；main 合入使用 squash，每个 PR 对应一条记录。
 
+## [v0.3.4] - 2026-09-28
+
+### Fixed
+
+- **responses lite 工具形状**：codex 0.154+ 在 `use_responses_lite` 模式下把工具声明在 `input` 的 `additional_tools` 载体里、按 namespace 分组，而不是顶层 `tools` 字段；适配器此前只读 `tools`，于是**转给上游的请求一个工具都没有**——模型只能凭 developer 提示词里的文字描述去猜格式，把调用吐成原始文本标记（DeepSeek 的 `<｜｜DSML｜｜…>`、`<functions.exec>…</functions.exec>`），而客户端没有从文本反解析工具调用的兜底，表现为"模型只说话、工具从不执行"。现在合并顶层 `tools` 与载体工具，把 namespace 子工具展开为确定性的 `<ns>__<child>`（超 64 字节则前缀截断 + `__` + sha256 前 8 字节），回程还原成 `{name, namespace}`（流式按帧、非流式后处理），并改写 `input` 历史里的 namespace 调用与 namespace 形状的 `tool_choice`。展开名撞车直接报错，不再静默丢工具。
+- **图片降级重试不再丢工具**：`rewriteBodyOmitImages` 拿适配前的原始快照重新适配，绕过了工具展开，重试请求一个工具都不带。两条路径现在共用 `applyCodexToolContext`。
+- **Chat 路径不再把工具载体当成空消息**：载体项带 `role` 却没有 `content`，Chat 转换器没有兜底分支，会生成一条空 user 消息发给上游（严格网关 400）。Messages 路径本就丢弃未知类型，无此问题。
+- **图片降级重试带上游不认的模型名**：`rewriteBodyOmitImages` 重新适配时 `doc["model"]` 仍是客户端原始拼写（如 `claude-opus-5`），而首次适配发的是归一后的名字（如 `Opus 5`）。`adapterContext` 新增 `normalizedModel` 供重新适配使用。
+- **别名命中后查表落空**：`SupportsImageInput` / `Classify` 直接拿 `NormalizeModelName` 的返回值查表，而别名值是上游 wire 拼写、未必是折叠形态（`Opus 5` vs `opus 5`），落空即静默 fail-open。新增 `lookupKey` 供查表，`NormalizeModelName` 保持返回 wire 拼写。
+
+### Changed
+
+- **model catalog 钉住三个字段**：`model/model-catalog-relay.json` 逐条目显式写 `tool_mode: "direct"`（客户端 CodeMode 特性默认关，显式声明可防止将来默认变更把适配模型拖进脆弱的 freeform 路径），`shell_type` 统一成规范拼写 `unified_exec`。
+
+### Docs
+
+- README 修正 `use_responses_lite` 的说明：适配器现已支持 lite 形状，该字段从"必需"变成"偏好"；Model catalog 一节记录三个钉住字段为何不能删。
+
 ## [v0.3.3] - 2026-09-28
 
 ### Fixed
